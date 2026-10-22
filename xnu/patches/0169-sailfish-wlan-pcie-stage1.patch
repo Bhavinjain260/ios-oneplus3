@@ -126,7 +126,7 @@
  sweet_log_thread(__unused void *arg, __unused wait_result_t wr)
 --- /dev/null
 +++ b/bsd/dev/sailfish_wlan.c
-@@ -0,0 +1,609 @@
+@@ -0,0 +1,633 @@
 +/*
 + * Pixel 1 Wi-Fi, stage 1: power the QCA6174 ("Rome") and bring up PCIe root
 + * complex 0, its only host interface, then read the chip's config-space ID.
@@ -386,6 +386,29 @@
 +		}
 +	}
 +	sweet_log_kick();
++}
++
++/* Every PM8994 rail (SID 1): S1-S12 at 0x1400 + 0x300 n, L1-L32 at 0x4000 + 0x100 n, LVS1/2 0x8000/0x8100. */
++static void
++wl_rails_dump(void)
++{
++	char line[512];
++	int n = 0;
++	for (unsigned i = 0; i < 12 + 32 + 2; i++) {
++		uint16_t ppid = i < 12 ? (uint16_t)(0x114 + 3 * i) : i < 44 ? (uint16_t)(0x140 + (i - 12)) : (uint16_t)(0x180 + (i - 44));
++		uint8_t st = 0, en = 0, mode = 0;
++		bool ok = sweet_pmic_read(ppid, 0x08, &st);
++		(void)sweet_pmic_read(ppid, 0x46, &en);
++		(void)sweet_pmic_read(ppid, 0x45, &mode);
++		char name[8];
++		snprintf(name, sizeof(name), i < 12 ? "S%u" : i < 44 ? "L%u" : "LVS%u",
++		    i < 12 ? i + 1 : i < 44 ? i - 11 : i - 43);
++		n += snprintf(line + n, sizeof(line) - n, " %s=%s%02x/%02x", name, ok ? "" : "?", st, mode);
++		if (n > 400 || i == 45) {
++			printf("SAILFISH WLAN: rails%s\n", line);
++			n = 0;
++		}
++	}
 +}
 +
 +static void
@@ -655,6 +678,7 @@
 +	 * WLAN_EN high -> PERST release ~25 ms): the PCIe side is ready first.
 +	 */
 +	wl_pmic_dump("at link");
++	wl_rails_dump();
 +	wl_step("chip on + link");
 +	{
 +		uint8_t s8 = 0, s9 = 0;
