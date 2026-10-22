@@ -94,7 +94,7 @@
  sweet_log_thread(__unused void *arg, __unused wait_result_t wr)
 --- /dev/null
 +++ b/bsd/dev/sailfish_wlan.c
-@@ -0,0 +1,570 @@
+@@ -0,0 +1,592 @@
 +/*
 + * Pixel 1 Wi-Fi, stage 1: power the QCA6174 ("Rome") and bring up PCIe root
 + * complex 0, its only host interface, then read the chip's config-space ID.
@@ -328,6 +328,25 @@
 +		printf("SAILFISH WLAN: pmic %s %s (ppid %#x): type %#x/%#x status %#x vset %#x en %#x%s\n", when,
 +		    p[i].name, p[i].ppid, type, sub, st, v, en, ok ? "" : " (read failed)");
 +	}
++}
++
++/* Register dump in pci-msm's layout (8 words a line), to diff against Linux's. */
++static void
++wl_dump(const char *name, vm_offset_t base, uint32_t size)
++{
++	for (uint32_t o = 0; o < size; o += 32) {
++		uint32_t v[8];
++		bool any = false;
++		for (int i = 0; i < 8; i++) {
++			v[i] = rd(base, o + 4 * i);
++			any |= v[i] != 0;
++		}
++		if (any) {
++			printf("SAILFISH WLAN: D %s 0x%04x %08x %08x %08x %08x %08x %08x %08x %08x\n", name, o,
++			    v[0], v[1], v[2], v[3], v[4], v[5], v[6], v[7]);
++		}
++	}
++	sweet_log_kick();
 +}
 +
 +static void
@@ -621,6 +640,9 @@
 +	    up ? "UP" : "DOWN", sts, lnk, rd(wl_parf, PARF_LTSSM), rd(wl_dbi, 0), rd(wl_perst, 4),
 +	    rd(wl_phy, PCS_ + 0x174), rd(wl_gcc, GCC_PCIE_0_PIPE_CBCR));
 +	if (!up) {
++		wl_dump("parf", wl_parf, 0x260);
++		wl_dump("phy", wl_phy, 0x1800);
++		wl_dump("dbi", wl_dbi, 0xf00);
 +		return false;
 +	}
 +
