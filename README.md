@@ -6,28 +6,30 @@ This project ports Apple's open-source XNU kernel (xnu-8796, the iOS 16 generati
 
 > Experimental, not a usable phone OS. Many things are missing or stubbed (see below) and Apple's security model is mostly switched off. It installs into the `userdata` partition and so **erases Android's user data**.
 
-## Status (2026-10-21)
+## Status (2026-10-22)
 
 - Boots from `fastboot boot` to the lock screen in **about 20 seconds**.
 - **GPU acceleration on the Adreno 530**: CoreAnimation's own OpenGL ES renderer runs on Mesa's freedreno driver, through our own kernel GPU driver.
-- Display updates **up to 60 Hz**. The GPU scales each frame onto the panel and the display flips between two buffers, so there is no tearing and no CPU copy. The UI runs at roughly 15–35 frames/s depending on the screen: CoreAnimation's CPU work in backboardd is now the limit, not the GPU.
+- Display updates **up to 60 Hz**. The GPU scales each frame onto the panel and the display flips between two buffers, so there is no tearing and no CPU copy. The UI runs at roughly 20–40 frames/s depending on the screen: CoreAnimation's CPU work in backboardd (and the app's main thread) is now the limit, not the GPU.
 - Lock screen, home screen, App Library, Control Center, notification center, Settings, the stock iOS 16 wallpaper with its layered artwork, and **all stock Apple apps** (Weather, Calendar, Clock, Mail, Notes, Maps, Music, Calculator, Files, ...).
 - Touchscreen, power / volume buttons, **real battery percentage and charging**.
 - **Brightness control and display sleep**: the Control Center / Settings slider, and the screen fades out on lock and back in on wake.
+- **Wi-Fi**: the Settings Wi-Fi page lists networks, joins WPA2 networks with a password, forgets and rejoins; iOS gets its address by DHCP and Safari loads pages.
 
 ## What works
 
 | Area | State |
 | --- | --- |
 | Boot | Stock Pixel bootloader → `fastboot boot` of our shim → XNU. Nothing is flashed to boot partitions |
-| CPU | All 4 Kryo cores via PSCI (1228 / 1363 MHz; optional turbo to 1594 / 2150 MHz with `sweetturbo=1`, runs hot), 16K pages, GICv3, timers |
+| CPU | All 4 Kryo cores via PSCI (1228 / 1363 MHz; optional `sweetboost=1824 sweetboostpwr=1478` or turbo to 1594 / 2150 MHz with `sweetturbo=1`, both run hot), 16K pages, GICv3 with device interrupts, timers |
 | Memory | 2 GB (the upper DDR bank), DDR clocked to 1804 MHz through the RPM |
 | Storage | Own UFS host driver; the iOS root is a journaled HFS+ volume in `userdata`, read/write |
 | iOS userland | Real iPhone 8 16.7.16 root filesystem, cryptexes and shared cache (the userland is ARMv8.0-clean, so it runs on Kryo) |
 | GPU | Adreno 530 at 600 MHz: power, clocks, SMMU, CP microcode, zap shader via TrustZone; buffer objects and command submission for user space. Mesa (freedreno, GLES 3.1) runs inside backboardd as `sweetgl.dylib`, behind an EAGL shim that CoreAnimation's GL renderer uses as if it were Apple's |
 | Display | Command-mode Samsung panel through the MDP: iOS sees an iPhone 8 panel (750×1334 @2x), scaled (bilinear, on the GPU) to 1080×1920; double-buffered, up to 60 Hz |
 | Brightness / sleep | iOS's CoreBrightness drives a kernel `AppleARMBacklight`, which sends the panel's DCS brightness command (0x51) through the DSI command FIFO between frames; display sleep blanks the layer mixer (black = pixels off on the AMOLED panel) |
-| Touch | Synaptics RMI4 over I²C (BLSP QUP), rails switched on through the RPM, delivered as HID digitizer events |
+| Touch | Synaptics RMI4 over I²C (BLSP QUP), rails switched on through the RPM, interrupt-driven, delivered as HID digitizer events |
+| Wi-Fi | QCA6174 over PCIe: own driver for firmware download (BMI), copy engines, HTC/WMI/HTT, scan, WPA2-PSK (CCMP) with our own 4-way and group-key handshake, rejoin after the AP drops us, interrupt-driven data path. To iOS it is an Apple80211 interface (`en0`), so wifid, configd and the Settings page drive it as on an iPhone |
 | Buttons | Power, volume up, volume down = **Home** (PMIC/TLMM), as HID keys |
 | Battery | Fuel gauge readout and charging at 1.5 A (PMI8994) |
 | Device identity | iPhone 8 (`iPhone10,1` / `D20AP`), Home-button UI |
@@ -35,7 +37,8 @@ This project ports Apple's open-source XNU kernel (xnu-8796, the iOS 16 generati
 
 ## What does not work (yet)
 
-- **No Wi-Fi, Bluetooth, cellular, audio, camera, sensors, GPS, Touch ID or SEP.**
+- **No Bluetooth, cellular, audio, camera, sensors, GPS, Touch ID or SEP.**
+- **Wi-Fi is WPA2-PSK only** (no WPA3, enterprise or open networks yet); 5 GHz is scanned passively, and turning Wi-Fi off does not power the chip down.
 - **No hardware video decoder:** HEIC images and video do not decode. The stock wallpapers' HEIC layers are converted to PNG when the root is built (`tools/wallpaper-heic2png.sh`).
 - **No Metal.** CoreAnimation falls back to its OpenGL ES renderer, which is what runs on the GPU. Apps that need Metal do not work.
 - **No thermal management:** keep turbo off for normal use.
@@ -65,13 +68,15 @@ You need a Google Pixel 1 (`sailfish`) with an **unlocked bootloader**, a Mac wi
    - the stock wallpapers: `tools/wallpaper-heic2png.sh MOUNTED_ROOT`.
 
    Then detach it, convert it with `tools/img2simg.py` and flash it with `fastboot flash userdata`. The first boot takes a few minutes longer while iOS builds its caches.
-3. **GPU firmware:** the Adreno 530 microcode (`a530_pm4.fw`, `a530_pfp.fw`, without their 4-byte headers) and the zap shader (`a530_zap.mdt` + `.b02`) come from the phone's own vendor firmware. They are not in this repository.
+3. **Firmware:** the Adreno 530 microcode (`a530_pm4.fw`, `a530_pfp.fw`, without their 4-byte headers), the zap shader (`a530_zap.mdt` + `.b02`) and the QCA6174 Wi-Fi files (`otp30.bin`, `qwlan30.bin`, `bdwlan30.bin`, `.b80`, `.b82`) come from the phone's own vendor partition. They are not in this repository.
 4. **Boot image:** `tools/mkadt.py ADT --pixel1` (needs the iPhone 8 device tree `d20ap` from the IPSW), then
 
    ```sh
    python3 tools/mkpayload.py KERNEL ADT payload --cmdline "$ARGS" \
        --blob GPU-PM4=pm4.bin --blob GPU-PFP=pfp.bin \
-       --blob GPU-ZAP-MDT=a530_zap.mdt --blob GPU-ZAP-SEG=a530_zap.b02
+       --blob GPU-ZAP-MDT=a530_zap.mdt --blob GPU-ZAP-SEG=a530_zap.b02 \
+       --blob WLAN-OTP=otp30.bin --blob WLAN-FW=qwlan30.bin --blob WLAN-BDF=bdwlan30.bin \
+       --blob WLAN-BDF-80=bdwlan30.b80 --blob WLAN-BDF-82=bdwlan30.b82
    WDT_SECS=0 shim/build-pixel.sh STOCK_BOOT.img payload     # -> shim/out/pixel-boot.img
    fastboot boot shim/out/pixel-boot.img
    ```
@@ -83,7 +88,10 @@ You need a Google Pixel 1 (`sailfish`) with an **unlocked bootloader**, a Mac wi
    ignition_level=1 wdt_test=no_user_checkin ufsrw=1 rootrw=1 launchd_unsecure_cache=1 wdt=-1
    sweetfb_noconsole=1 sweetsample=- sweetnull=backboardd cs_enforcement_disable=1 sweetprof=-
    sweetgpu=8 sweetgpuclk=600 sweetddr=1804 sweetenv=backboardd:DYLD_INSERT_LIBRARIES=/usr/lib/sweetgl.dylib
+   sailfishwlan=1
    ```
+
+   Boot-args are limited to 608 bytes; longer command lines are cut off silently. Join a network from Settings (or add `sailfishssid=` / `sailfishpsk=` to join at boot).
 
 5. **Logs:** boot TWRP (`fastboot boot twrp.img`), then `tools/sweet-log-pull.sh OUT.txt`.
 
@@ -103,6 +111,7 @@ You need a Google Pixel 1 (`sailfish`) with an **unlocked bootloader**, a Mac wi
 - `bsd/dev/sweet_gpu.c`, `iokit/Kernel/arm/SweetGPU.cpp`: Adreno 530 bring-up and a msm-style buffer/submit interface for user space.
 - `iokit/Kernel/arm/SweetSurface.cpp`, `SweetFramebuffer.cpp`: IOSurface and IOMobileFramebuffer (`AppleCLCD`) as backboardd expects them; GPU present into double-buffered panel memory.
 - `bsd/dev/sweet_rpm.c`: talks to the RPM like Linux (GLINK, smd-rpm) for regulators, clocks, DDR and the memory rail.
+- `bsd/dev/sailfish_wlan.c`, `iokit/Kernel/arm/SailfishWLAN.cpp`: the QCA6174 Wi-Fi driver and its Apple80211 / IONetworking face for wifid and configd (Apple's IONetworkingFamily is staged into the kernel by `xnu/patches/0175-stage-ionetworking.sh`).
 - `bsd/dev/sweet_ufs.c`, `sweet_keys.c`, `sweet_touch.c`, `sweet_perf.c`: storage, buttons, touch, CPU clocks.
 
 ## Credits
