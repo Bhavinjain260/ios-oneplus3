@@ -94,7 +94,7 @@
  sweet_log_thread(__unused void *arg, __unused wait_result_t wr)
 --- /dev/null
 +++ b/bsd/dev/sailfish_wlan.c
-@@ -0,0 +1,559 @@
+@@ -0,0 +1,570 @@
 +/*
 + * Pixel 1 Wi-Fi, stage 1: power the QCA6174 ("Rome") and bring up PCIe root
 + * complex 0, its only host interface, then read the chip's config-space ID.
@@ -315,15 +315,18 @@
 +		{"S3", 0x11a}, {"S4", 0x11d}, {"L12", 0x14b}, {"L28", 0x15b}, {"L30", 0x15d},
 +		{"clk50", 0x050}, {"clk51", 0x051}, {"clk52", 0x052}, {"clk53", 0x053},
 +		{"clk54", 0x054}, {"clk55", 0x055},
++		{"gpio8", 0x0c7}, {"gpio9", 0x0c8}, {"gpio18", 0x0d1},
 +	};
 +	for (unsigned i = 0; i < sizeof(p) / sizeof(p[0]); i++) {
-+		uint8_t type = 0, st = 0, v = 0, en = 0;
++		uint8_t type = 0, sub = 0, st = 0, v = 0, en = 0;
 +		bool ok = sweet_pmic_read(p[i].ppid, 0x04, &type);
++		(void)sweet_pmic_read(p[i].ppid, 0x05, &sub);
 +		(void)sweet_pmic_read(p[i].ppid, 0x08, &st);
 +		(void)sweet_pmic_read(p[i].ppid, 0x41, &v);
 +		(void)sweet_pmic_read(p[i].ppid, 0x46, &en);
-+		printf("SAILFISH WLAN: pmic %s %s (ppid %#x): type %#x status %#x vset %#x en %#x%s\n", when,
-+		    p[i].name, p[i].ppid, type, st, v, en, ok ? "" : " (read failed)");
++		/* GPIOs: status bit 0 = the level on the pin, 0x41 = VIN */
++		printf("SAILFISH WLAN: pmic %s %s (ppid %#x): type %#x/%#x status %#x vset %#x en %#x%s\n", when,
++		    p[i].name, p[i].ppid, type, sub, st, v, en, ok ? "" : " (read failed)");
 +	}
 +}
 +
@@ -578,12 +581,20 @@
 +	 */
 +	wl_pmic_dump("at link");
 +	wl_step("chip on + link");
++	printf("SAILFISH WLAN: chip in reset: clkreq in %u, wake in %u\n", rd(wl_clkreq, 4) & 1u, rd(wl_wake, 4) & 1u);
 +	wl_tlmm_out(wl_boot, 1, 16, 1);         /* cnss_default: gpio, pull-down, driven high */
 +	wl_msleep(10);
 +	if (!wl_pmic_gpio_high("wlan_en", WL_PMIC_EN, 2, 4)) {      /* DT: vin-sel 2 (1.8 V), pull 4 (down) */
 +		return false;
 +	}
 +	wl_msleep(10);                          /* WLAN_ENABLE_DELAY */
++	{
++		uint8_t s8 = 0, s9 = 0;
++		(void)sweet_pmic_read(WL_PMIC_EN, 0x08, &s8);
++		(void)sweet_pmic_read(WL_PMIC_ROME, 0x08, &s9);
++		printf("SAILFISH WLAN: chip on: wlan_en pin status %#x, rome_vreg pin status %#x, clkreq in %u\n",
++		    s8, s9, rd(wl_clkreq, 4) & 1u);
++	}
 +	wl_msleep(10);                          /* qcom,ep-latency */
 +
 +	/* Endpoint out of reset, link training. */
