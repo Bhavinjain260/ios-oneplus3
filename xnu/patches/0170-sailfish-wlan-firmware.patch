@@ -57,14 +57,12 @@
  /* Register dump in pci-msm's layout (8 words a line), to diff against Linux's. */
  static void
  wl_dump(const char *name, vm_offset_t base, uint32_t size)
-@@ -258,29 +233,6 @@
- 		}
- 	}
+@@ -260,30 +235,7 @@
  	sweet_log_kick();
--}
--
+ }
+ 
 -/* Every PM8994 rail (SID 1): S1-S12 at 0x1400 + 0x300 n, L1-L32 at 0x4000 + 0x100 n, LVS1/2 0x8000/0x8100. */
--static void
+ static void
 -wl_rails_dump(void)
 -{
 -	char line[512];
@@ -84,9 +82,12 @@
 -			n = 0;
 -		}
 -	}
- }
- 
- static void
+-}
+-
+-static void
+ wl_phy_common(void)
+ {
+ 	static const uint16_t seq[][2] = {
 @@ -404,7 +356,6 @@
  	printf("SAILFISH WLAN: clkreq cfg %#x, wake cfg %#x\n", rd(wl_clkreq, 0), rd(wl_wake, 0));
  	wl_msleep(1);
@@ -104,11 +105,10 @@
  	wl_step("chip on + link");
  	{
  		uint8_t s8 = 0, s9 = 0;
-@@ -616,14 +565,802 @@
- 	printf("SAILFISH WLAN: endpoint id %#x class/rev %#x bar0 %#x%s\n", id, rev, rd(wl_conf, 0x10),
+@@ -617,13 +566,815 @@
  	    id == 0x003e168cu ? " = QCA6174" : "");
  	return id == 0x003e168cu;
-+}
+ }
 +
 +/*
 + * Stage 2: BAR0, then the chip's boot ROM (BMI) through its copy engines,
@@ -125,7 +125,7 @@
 +#define WL_DMA_PA       0xa0000000u     /* low-bank DRAM: not XNU's (upper bank), no carve-out, < 4 GB (CE addresses are 32-bit) */
 +#define WL_DMA_SIZE     0x20000u
 +#define WL_SMMU_PA      0x01640000u     /* anoc0 SMMU (pcie0 iommus) */
-+
+ 
 +/* QCA6174 BAR0 (ath10k hw.c qca6174_regs = qcacld ar6320v2def.h) */
 +#define Q_SOC_CORE      0x3a000u        /* CORE_CTRL; bit 13 = interrupt the target CPU */
 +#define Q_FW_IND        0x3a028u
@@ -183,7 +183,7 @@
 +static struct wl_ce ce1 = { Q_CE(1), 0, D_CE1_DST, 15 };
 +static struct wl_ce ce7 = { Q_CE(7), D_CE7_SRC, D_CE7_DST, 1 };
 +
-+static void
+ static void
 +wl_ce_init(struct wl_ce *c, uint32_t dmax)
 +{
 +	uint32_t n = c->mask + 1;
@@ -204,9 +204,9 @@
 +		wr(wl_bar, c->reg + CE_CTRL1, rd(wl_bar, c->reg + CE_CTRL1) & ~(1u << 17));
 +		wr(wl_bar, c->reg + CE_DST_WM, n);
 +	}
- }
- 
- static void
++}
++
++static void
 +wl_ce_send(struct wl_ce *c, uint32_t pa, uint32_t len, uint16_t flags)
 +{
 +	volatile uint32_t *d = (volatile uint32_t *)(wl_dma + c->src + 8 * c->swr);
@@ -816,8 +816,9 @@
 +	    !bmi_read32(HI(HI_OPTION), &opt) ||
 +	    !bmi_write32(HI(HI_OPTION), opt | 1u << 9 | 2u << 12 | 1u << 3) ||   /* 1 device, AP mode, MAC addr method 1 */
 +	    !bmi_read32(HI(HI_OPTION2), &opt2) ||
-+	    !bmi_write32(HI(HI_OPTION2), opt2 | 0x20) ||  /* DISABLE_CDC_MAX_PERF_WAR */
-+	    !bmi_write32(HI(HI_BE), 0) || !bmi_write32(HI(HI_FW_SWAP), 0)) {
++	    !bmi_write32(HI(HI_OPTION2), opt2 | 0x20 | 0x80) ||  /* DISABLE_CDC_MAX_PERF_WAR, DBUART (Pixel ini gEnableLpassSupport=1) */
++	    !bmi_write32(HI(HI_BE), 0) || !bmi_write32(HI(HI_FW_SWAP), 0) ||
++	    !bmi_write32(HI(0xbc), 0x003e)) {    /* hi_hci_uart_pwr_mgmt_params_ext = PCI device ID (ath10k) */
 +		return false;
 +	}
 +
@@ -865,17 +866,17 @@
 +	absolutetime_to_nanoseconds(mach_absolute_time() - t0, &ns);
 +	printf("SAILFISH WLAN: firmware %u bytes in %llu ms\n", fw_len, ns / 1000000);
 +	if (!bmi_write32(HI(HI_SERIAL), 0) || !bmi_read32(HI(HI_OPTION), &opt) ||
-+	    !bmi_write32(HI(HI_OPTION), opt | 0x40)) {    /* HI_OPTION_DISABLE_DBGLOG */
++	    !bmi_write32(HI(HI_OPTION), opt & ~0x40u)) {  /* firmware log on (Pixel ini gEnablefwlog=1) */
 +		return false;
 +	}
 +
 +	wl_step("bmi done");
++	for (uint32_t i = 0; i < 14; i++) {    /* HTC READY lands here: posted before BMI_DONE */
++		wl_ce_post(&ce1, WL_DMA_PA + D_RX + 2048 * i);
++	}
 +	wl_q[0] = 1;
 +	if (!wl_bmi(4, 0)) {
 +		return false;
-+	}
-+	for (uint32_t i = 0; i < 15; i++) {
-+		wl_ce_post(&ce1, WL_DMA_PA + D_RX + 2048 * i);
 +	}
 +	uint32_t n = 0;
 +	for (int i = 0; i < 5000 && !n; i++) {
@@ -889,6 +890,19 @@
 +	    rd(wl_bar, Q_FW_IND), n, m[0], m[1], m[2], m[3], m[4], m[5]);
 +	if (!n) {
 +		wl_ce_dump("no htc", &ce1);
++	}
++	uint32_t fs = 0;
++	if ((rd(wl_bar, Q_FW_IND) & 1u) && wl_diag_read32(HI(0x04), &fs) && fs) {
++		/* Firmware crash: hi_failure_state -> register dump (ath10k_pci_dump_registers, 60 words). */
++		uint32_t w[60] = { 0 };
++		for (int i = 0; i < 60 && wl_diag_read32(fs + 4 * i, &w[i]); i++) {
++		}
++		printf("SAILFISH WLAN: FIRMWARE CRASH, dump at %#x:\n", fs);
++		for (int i = 0; i < 60; i += 6) {
++			printf("SAILFISH WLAN: crash[%02d] %08x %08x %08x %08x %08x %08x\n", i, w[i], w[i + 1], w[i + 2],
++			    w[i + 3], w[i + 4], w[i + 5]);
++		}
++		sweet_log_kick();
 +	}
 +	return n != 0;
 +}
