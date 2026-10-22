@@ -75,7 +75,7 @@
  sweet_log_thread(__unused void *arg, __unused wait_result_t wr)
 --- /dev/null
 +++ b/bsd/dev/sailfish_wlan.c
-@@ -0,0 +1,498 @@
+@@ -0,0 +1,510 @@
 +/*
 + * Pixel 1 Wi-Fi, stage 1: power the QCA6174 ("Rome") and bring up PCIe root
 + * complex 0, its only host interface, then read the chip's config-space ID.
@@ -504,6 +504,17 @@
 +		return false;
 +	}
 +	wl_phy_port();
++	/* Lane up: PCS_STATUS PHYSTATUS (bit 6) clears once the pipe clock runs (mainline qmp power_on). */
++	uint32_t pcs = 0;
++	for (int i = 0; i < 100; i++) {
++		pcs = rd(wl_phy, PCS_ + 0x174);
++		if (!(pcs & (1u << 6))) {
++			break;
++		}
++		delay(100);
++	}
++	printf("SAILFISH WLAN: lane %s (pcs status %#x, pipe cbcr %#x, com ready %#x)\n",
++	    (pcs & (1u << 6)) ? "NOT UP" : "up", pcs, rd(wl_gcc, GCC_PCIE_0_PIPE_CBCR), rd(wl_phy, PCIE_COM_PCS_READY_STATUS));
 +	wl_msleep(10);                          /* qcom,ep-latency */
 +
 +	/* Endpoint out of reset, link training. */
@@ -527,8 +538,9 @@
 +		}
 +		ltssm = st;
 +	}
-+	printf("SAILFISH WLAN: link %s after PERST (elbi %#x, link status %#x, ltssm %#x, rc id %#x)\n",
-+	    up ? "UP" : "DOWN", sts, lnk, rd(wl_parf, PARF_LTSSM), rd(wl_dbi, 0));
++	printf("SAILFISH WLAN: link %s after PERST (elbi %#x, link status %#x, ltssm %#x, rc id %#x, perst io %#x, pcs status %#x, pipe cbcr %#x)\n",
++	    up ? "UP" : "DOWN", sts, lnk, rd(wl_parf, PARF_LTSSM), rd(wl_dbi, 0), rd(wl_perst, 4),
++	    rd(wl_phy, PCS_ + 0x174), rd(wl_gcc, GCC_PCIE_0_PIPE_CBCR));
 +	if (!up) {
 +		return false;
 +	}
