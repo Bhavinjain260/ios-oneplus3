@@ -75,7 +75,7 @@
  sweet_log_thread(__unused void *arg, __unused wait_result_t wr)
 --- /dev/null
 +++ b/bsd/dev/sweet_wlan.c
-@@ -0,0 +1,464 @@
+@@ -0,0 +1,483 @@
 +/*
 + * Pixel 1 Wi-Fi, stage 1: power the QCA6174 ("Rome") and bring up PCIe root
 + * complex 0, its only host interface, then read the chip's config-space ID.
@@ -253,20 +253,30 @@
 +	wr(tile, 0, (1u << 9) | ((ma / 2 - 1) << 6) | pull);    /* OE, drive, func 0 */
 +}
 +
-+/* PMIC GPIO (PM8994, digital output) driven high. */
++/*
++ * PMIC GPIO (PM8994) driven high as the live DT configures it (qpnp-pin):
++ * the output level comes from VIN_CTL (0x41), so the voltage source and
++ * the pull are set before the pin turns into an output.
++ * MODE_CTL: mode [6:4] = 1 digital output, source [3:1] = 0, invert bit 0.
++ */
 +static bool
-+wl_pmic_gpio_high(const char *name, uint16_t ppid)
++wl_pmic_gpio_high(const char *name, uint16_t ppid, uint8_t vin, uint8_t pull)
 +{
-+	uint8_t mode = 0, en = 0, out = 0;
++	uint8_t mode = 0, vin0 = 0, pull0 = 0, en = 0, out = 0;
 +	(void)sweet_pmic_read(ppid, 0x40, &mode);
-+	(void)sweet_pmic_read(ppid, 0x46, &en);
++	(void)sweet_pmic_read(ppid, 0x41, &vin0);
++	(void)sweet_pmic_read(ppid, 0x42, &pull0);
 +	(void)sweet_pmic_read(ppid, 0x45, &out);
-+	/* MODE_CTL: mode [6:4] = 1 digital output, source [3:1] = 0, value bit 0 */
-+	bool ok = sweet_pmic_write(ppid, 0x40, 0x11) && sweet_pmic_write(ppid, 0x46, 0x80);
-+	uint8_t after = 0;
++	(void)sweet_pmic_read(ppid, 0x46, &en);
++	/* Already a high output from the right source (ABL sets rome_vreg up): leave it. */
++	bool ok = (mode == 0x11 && vin0 == vin && (en & 0x80)) ||
++	    (sweet_pmic_write(ppid, 0x41, vin) && sweet_pmic_write(ppid, 0x42, pull) &&
++	    sweet_pmic_write(ppid, 0x40, 0x11) && sweet_pmic_write(ppid, 0x46, 0x80));
++	uint8_t after = 0, vin1 = 0;
 +	(void)sweet_pmic_read(ppid, 0x40, &after);
-+	printf("SWEET WLAN: PMIC %s (ppid %#x): mode %#x en %#x out %#x -> mode %#x: %s\n",
-+	    name, ppid, mode, en, out, after, ok ? "high" : "WRITE FAILED");
++	(void)sweet_pmic_read(ppid, 0x41, &vin1);
++	printf("SWEET WLAN: PMIC %s (ppid %#x): mode %#x vin %#x pull %#x out %#x en %#x -> mode %#x vin %#x: %s\n",
++	    name, ppid, mode, vin0, pull0, out, en, after, vin1, ok ? "high" : "WRITE FAILED");
 +	return ok;
 +}
 +
@@ -399,13 +409,13 @@
 +
 +	/* The chip: vdd-wlan, bootstrap, WLAN_EN. */
 +	wl_step("chip power");
-+	if (!wl_pmic_gpio_high("rome_vreg", WL_PMIC_ROME)) {
++	if (!wl_pmic_gpio_high("rome_vreg", WL_PMIC_ROME, 0, 5)) {    /* DT: vin-sel 0 */
 +		return false;
 +	}
 +	wl_msleep(6);
 +	wl_tlmm_out(wl_boot, 1, 16, 3);
 +	wl_msleep(10);
-+	if (!wl_pmic_gpio_high("wlan_en", WL_PMIC_EN)) {
++	if (!wl_pmic_gpio_high("wlan_en", WL_PMIC_EN, 2, 4)) {      /* DT: vin-sel 2 (1.8 V), pull 4 (down) */
 +		return false;
 +	}
 +	wl_msleep(10);
@@ -438,6 +448,15 @@
 +	if (!clk) {
 +		return false;
 +	}
++	/* PHY resets pulsed (mainline qcom_qmp: assert, then deassert). */
++	printf("SWEET WLAN: BCRs phy %#x com %#x nocsr %#x lane %#x, clkref %#x\n",
++	    rd(wl_gcc, GCC_PCIE_PHY_BCR), rd(wl_gcc, GCC_PCIE_PHY_COM_BCR),
++	    rd(wl_gcc, GCC_PCIE_PHY_NOCSR_COM_PHY_BCR), rd(wl_gcc, GCC_PCIE_0_PHY_BCR), rd(wl_gcc, GCC_PCIE_CLKREF_EN));
++	wr(wl_gcc, GCC_PCIE_PHY_BCR, 1);
++	wr(wl_gcc, GCC_PCIE_PHY_COM_BCR, 1);
++	wr(wl_gcc, GCC_PCIE_PHY_NOCSR_COM_PHY_BCR, 1);
++	wr(wl_gcc, GCC_PCIE_0_PHY_BCR, 1);
++	wl_msleep(1);
 +	wr(wl_gcc, GCC_PCIE_PHY_BCR, 0);
 +	wr(wl_gcc, GCC_PCIE_PHY_COM_BCR, 0);
 +	wr(wl_gcc, GCC_PCIE_PHY_NOCSR_COM_PHY_BCR, 0);
