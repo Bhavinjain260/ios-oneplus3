@@ -75,7 +75,7 @@
  sweet_log_thread(__unused void *arg, __unused wait_result_t wr)
 --- /dev/null
 +++ b/bsd/dev/sweet_wlan.c
-@@ -0,0 +1,451 @@
+@@ -0,0 +1,464 @@
 +/*
 + * Pixel 1 Wi-Fi, stage 1: power the QCA6174 ("Rome") and bring up PCIe root
 + * complex 0, its only host interface, then read the chip's config-space ID.
@@ -118,6 +118,8 @@
 +#define WL_CONF_PA      0x0c100000u
 +
 +#define WL_GPIO_PERST   35u
++#define WL_GPIO_CLKREQ  36u             /* function 1 = pci_e0 */
++#define WL_GPIO_WAKE    37u
 +#define WL_GPIO_BOOT    46u
 +#define WL_PMIC_ROME    0x0c8u          /* PM8994 GPIO 9 */
 +#define WL_PMIC_EN      0x0c7u          /* PM8994 GPIO 8 */
@@ -165,7 +167,7 @@
 +#define RX_                             0x1200u
 +#define PCS_                            0x1400u
 +
-+static vm_offset_t wl_gcc, wl_parf, wl_phy, wl_dbi, wl_conf, wl_perst, wl_boot;
++static vm_offset_t wl_gcc, wl_parf, wl_phy, wl_dbi, wl_conf, wl_perst, wl_boot, wl_clkreq, wl_wake;
 +
 +static inline uint32_t
 +rd(vm_offset_t b, uint32_t o)
@@ -370,7 +372,9 @@
 +	wl_conf = wl_map(WL_CONF_PA, 0x1000);
 +	wl_perst = wl_map(WL_TLMM_PA + 0x1000u * WL_GPIO_PERST, 0x1000);
 +	wl_boot = wl_map(WL_TLMM_PA + 0x1000u * WL_GPIO_BOOT, 0x1000);
-+	if (!wl_gcc || !wl_parf || !wl_phy || !wl_dbi || !wl_conf || !wl_perst || !wl_boot) {
++	wl_clkreq = wl_map(WL_TLMM_PA + 0x1000u * WL_GPIO_CLKREQ, 0x1000);
++	wl_wake = wl_map(WL_TLMM_PA + 0x1000u * WL_GPIO_WAKE, 0x1000);
++	if (!wl_gcc || !wl_parf || !wl_phy || !wl_dbi || !wl_conf || !wl_perst || !wl_boot || !wl_clkreq || !wl_wake) {
 +		printf("SWEET WLAN: mapping failed\n");
 +		return false;
 +	}
@@ -380,8 +384,11 @@
 +	    rd(wl_gcc, GCC_PCIE_0_GDSCR), rd(wl_gcc, GCC_AGGRE0_NOC_GDSCR));
 +	wl_step("rails");
 +
-+	/* PCIe endpoint held in reset while everything powers up. */
++	/* PCIe endpoint held in reset while everything powers up; CLKREQ# and WAKE# as in pcie0 pinctrl "default". */
 +	wl_tlmm_out(wl_perst, 0, 2, 1);
++	wr(wl_clkreq, 0, (1u << 2) | 3u);       /* pci_e0, 2 mA, pull-up */
++	wr(wl_wake, 0, 3u);                     /* GPIO input, 2 mA, pull-up */
++	printf("SWEET WLAN: clkreq cfg %#x, wake cfg %#x\n", rd(wl_clkreq, 0), rd(wl_wake, 0));
 +	wl_msleep(1);
 +
 +	/* Rails and the reference clock. */
@@ -472,13 +479,19 @@
 +	wr(wl_dbi, DBI_DEVICE_CONTROL_STATUS,
 +	    (rd(wl_dbi, DBI_DEVICE_CONTROL_STATUS) & ~0x7000u) | (5u << 12));      /* max read 4 KB */
 +	wr(wl_parf, PARF_LTSSM, rd(wl_parf, PARF_LTSSM) | (1u << 8));
-+	uint32_t sts = 0, lnk = 0;
++	uint32_t sts = 0, lnk = 0, ltssm = 0xff, seen = 0;
 +	bool up = false;
-+	for (int i = 0; i < 40 && !up; i++) {
-+		wl_msleep(5);
++	for (int i = 0; i < 1000 && !up; i++) {         /* 1 s, like mainline dw_pcie_wait_for_link */
++		delay(1000);
 +		sts = rd(wl_dbi, ELBI_SYS_STTS);
 +		lnk = rd(wl_dbi, DBI_LINK_STATUS);
 +		up = (sts & XMLH_LINK_UP) && (lnk & (1u << 29));
++		uint32_t st = rd(wl_dbi, 0x728) & 0x3fu;        /* PORT_DEBUG0: LTSSM state */
++		if (st != ltssm && seen++ < 24) {
++			printf("SWEET WLAN: LTSSM %#x at %d ms (debug1 %#x, clkreq in %u, wake in %u)\n", st, i,
++			    rd(wl_dbi, 0x72c), (rd(wl_clkreq, 4) & 1u), (rd(wl_wake, 4) & 1u));
++		}
++		ltssm = st;
 +	}
 +	printf("SWEET WLAN: link %s after PERST (elbi %#x, link status %#x, ltssm %#x, rc id %#x)\n",
 +	    up ? "UP" : "DOWN", sts, lnk, rd(wl_parf, PARF_LTSSM), rd(wl_dbi, 0));
