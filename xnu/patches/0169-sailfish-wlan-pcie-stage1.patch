@@ -21,7 +21,7 @@
  
  static LCK_GRP_DECLARE(sweet_rpm_grp, "sweet_rpm");
  static LCK_MTX_DECLARE(sweet_rpm_lock, &sweet_rpm_grp);
-@@ -372,10 +376,69 @@
+@@ -372,10 +376,72 @@
  	bool ok = rpm_request("MX", 0, 0x61706d73u, 2, kv, 2);           /* "smpa" */
  	lck_mtx_unlock(&sweet_rpm_lock);
  	printf("SWEET RPM: MX corner %u: %s\n", corner, ok ? "ok" : "FAILED");
@@ -39,9 +39,9 @@
 +	bool ok = rpm_request(what, 0, 0x616f646cu, ldo, kv, 3);       /* "ldoa" */
 +	lck_mtx_unlock(&sweet_rpm_lock);
 +	printf("SWEET RPM: L%u %u uV %u mA: %s\n", ldo, uv, ma, ok ? "ok" : "FAILED");
- 	return ok;
- }
- 
++	return ok;
++}
++
 +/* Vote PM8994 SMPSn on at uv in the active set (RPM "smpa", like sweet_rpm_ldoa). */
 +bool
 +sweet_rpm_smpa(unsigned smps, uint32_t uv)
@@ -56,7 +56,7 @@
 +	return ok;
 +}
 +
- /*
++/*
 + * VDD_CX (PM8994 S1, RPM "smpa" 1) corner vote in the active set, like
 + * Linux's pm8994_s1_corner (key "corn" = corner - 1, as the MX vote). PCIe
 + * (qcom,vreg-cx-voltage-level <7 4 0>) needs at least corner 4 (nominal).
@@ -69,19 +69,22 @@
 +	bool ok = rpm_request("CX", 0, 0x61706d73u, 1, kv, 2);           /* "smpa" */
 +	lck_mtx_unlock(&sweet_rpm_lock);
 +	printf("SWEET RPM: CX corner %u: %s\n", corner, ok ? "ok" : "FAILED");
-+	return ok;
-+}
-+
-+/*
-+ * XO buffer (RPM "clka", Linux DEFINE_CLK_RPM_SMD_XO_BUFFER) on in the active
-+ * set: key "Enab" = 1. id 8 = LN_BB_CLK, the PCIe reference clock.
+ 	return ok;
+ }
+ 
+ /*
++ * XO buffer (RPM "clka", Linux DEFINE_CLK_RPM_SMD_XO_BUFFER) on in the sleep
++ * and the active set: key "swen" (RPM_KEY_SOFTWARE_ENABLE) = 1. NOT "Enab":
++ * the RPM acks that key and ignores it (0169a-r: LN_BB never came on).
++ * id 8 = LN_BB_CLK, the PCIe reference clock.
 + */
 +bool
 +sweet_rpm_xo_buffer(uint32_t id)
 +{
-+	uint32_t kv[2] = {0x62616e45u, 1u};                     /* "Enab" */
++	uint32_t kv[2] = {0x6e657773u, 1u};                     /* "swen" */
 +	lck_mtx_lock(&sweet_rpm_lock);
-+	bool ok = rpm_request("xo buffer", 0, 0x616b6c63u, id, kv, 1);  /* "clka" */
++	bool ok = rpm_request("xo buffer sleep", 1, 0x616b6c63u, id, kv, 1) &&  /* "clka" */
++	    rpm_request("xo buffer active", 0, 0x616b6c63u, id, kv, 1);
 +	lck_mtx_unlock(&sweet_rpm_lock);
 +	printf("SWEET RPM: XO buffer %u on: %s\n", id, ok ? "ok" : "FAILED");
 +	return ok;
