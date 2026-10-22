@@ -227,7 +227,15 @@ def build(seed=None, qemu=False, highmem=False, pixel1=False):
             ('compatible', cstr('sweet,display')),
             ('canvas-width', u32(750 if pixel1 else 1125)),
             ('canvas-height', u32(1334 if pixel1 else 2436)),
-        ])])
+        ])] + ([
+        # Wi-Fi (bsd/dev/sailfish_wlan.c, QCA6174 on PCIe): launchd starts
+        # wifid only if the tree has a node named wlan; SailfishWLAN (the
+        # interface's controller) matches this nub.
+        node('wlan', [
+            ph(),
+            ('device_type', cstr('wlan')),
+            ('compatible', cstr('wlan-pcie,sailfish')),
+        ])] if pixel1 else []))
 
     fbcon = node('sweet-fbcon', [
         ph(),
