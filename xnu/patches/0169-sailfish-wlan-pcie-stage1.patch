@@ -10,16 +10,17 @@
  bsd/dev/sweet_spmi.c			standard
 --- a/bsd/dev/sweet_rpm.c
 +++ b/bsd/dev/sweet_rpm.c
-@@ -26,6 +26,8 @@
+@@ -26,6 +26,9 @@
  bool sweet_rpm_ldoa(unsigned ldo, uint32_t uv);
  bool sweet_rpm_clk(uint32_t type, uint32_t id, uint32_t khz);
  bool sweet_rpm_clk_scaling(void);
 +bool sweet_rpm_xo_buffer(uint32_t id);
 +bool sweet_rpm_smpa(unsigned smps, uint32_t uv);
++bool sweet_rpm_cx_corner(uint32_t corner);
  
  static LCK_GRP_DECLARE(sweet_rpm_grp, "sweet_rpm");
  static LCK_MTX_DECLARE(sweet_rpm_lock, &sweet_rpm_grp);
-@@ -372,10 +374,39 @@
+@@ -372,10 +375,55 @@
  	bool ok = rpm_request("MX", 0, 0x61706d73u, 2, kv, 2);           /* "smpa" */
  	lck_mtx_unlock(&sweet_rpm_lock);
  	printf("SWEET RPM: MX corner %u: %s\n", corner, ok ? "ok" : "FAILED");
@@ -37,6 +38,22 @@
 +	bool ok = rpm_request(what, 0, 0x61706d73u, smps, kv, 2);      /* "smpa" */
 +	lck_mtx_unlock(&sweet_rpm_lock);
 +	printf("SWEET RPM: S%u %u uV: %s\n", smps, uv, ok ? "ok" : "FAILED");
++	return ok;
++}
++
++/*
++ * VDD_CX (PM8994 S1, RPM "smpa" 1) corner vote in the active set, like
++ * Linux's pm8994_s1_corner (key "corn" = corner - 1, as the MX vote). PCIe
++ * (qcom,vreg-cx-voltage-level <7 4 0>) needs at least corner 4 (nominal).
++ */
++bool
++sweet_rpm_cx_corner(uint32_t corner)
++{
++	uint32_t kv[4] = {0x6e657773u, 1u, 0x6e726f63u, corner - 1};   /* swen = 1, corn */
++	lck_mtx_lock(&sweet_rpm_lock);
++	bool ok = rpm_request("CX", 0, 0x61706d73u, 1, kv, 2);           /* "smpa" */
++	lck_mtx_unlock(&sweet_rpm_lock);
++	printf("SWEET RPM: CX corner %u: %s\n", corner, ok ? "ok" : "FAILED");
  	return ok;
  }
  
@@ -94,7 +111,7 @@
  sweet_log_thread(__unused void *arg, __unused wait_result_t wr)
 --- /dev/null
 +++ b/bsd/dev/sailfish_wlan.c
-@@ -0,0 +1,592 @@
+@@ -0,0 +1,594 @@
 +/*
 + * Pixel 1 Wi-Fi, stage 1: power the QCA6174 ("Rome") and bring up PCIe root
 + * complex 0, its only host interface, then read the chip's config-space ID.
@@ -126,6 +143,7 @@
 +extern bool sweet_rpm_ldoa(unsigned ldo, uint32_t uv);
 +extern bool sweet_rpm_xo_buffer(uint32_t id);
 +extern bool sweet_rpm_smpa(unsigned smps, uint32_t uv);
++extern bool sweet_rpm_cx_corner(uint32_t corner);
 +extern bool sweet_pmic_read(uint16_t ppid, uint8_t addr, uint8_t *out);
 +extern bool sweet_pmic_write(uint16_t ppid, uint8_t addr, uint8_t val);
 +extern void sweet_log_kick(void);
@@ -476,6 +494,7 @@
 +	(void)sweet_rpm_smpa(4, 1800000);       /* vdd-wlan-io */
 +	delay(1000);
 +	(void)sweet_rpm_ldoa(30, 1800000);      /* WLAN xtal */
++	(void)sweet_rpm_cx_corner(7);           /* vreg-cx: PCIe logic (Linux: 4..7) */
 +	(void)sweet_rpm_ldoa(12, 1800000);      /* PCIe PHY 1.8 V */
 +	(void)sweet_rpm_ldoa(28, 925000);       /* PCIe PHY 0.9 V */
 +	(void)sweet_rpm_xo_buffer(8);           /* LN_BB_CLK */
