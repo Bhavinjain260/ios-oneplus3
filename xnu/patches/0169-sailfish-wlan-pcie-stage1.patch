@@ -4,7 +4,7 @@
  bsd/dev/sweet_perf.c			standard
  bsd/dev/sweet_gpu.c			standard
  bsd/dev/sweet_touch.c			standard
-+bsd/dev/sweet_wlan.c			standard
++bsd/dev/sailfish_wlan.c			standard
  bsd/dev/sweet_rpm.c			standard
  bsd/dev/sweet_rpmh.c			standard
  bsd/dev/sweet_spmi.c			standard
@@ -46,7 +46,7 @@
  extern void sweet_perf_init(void);
  extern void sweet_gpu_init(void);
  extern void sweet_touch_init(void);
-+extern void sweet_wlan_init(void);
++extern void sailfish_wlan_init(void);
  extern void sweet_usb_probe(void);
  
  #define REG_CAP         0x00
@@ -54,7 +54,7 @@
  	sweet_usb_probe();
  	sweet_perf_init();
  	sweet_gpu_init();
-+	sweet_wlan_init();
++	sailfish_wlan_init();
  	return 0;
  }
  
@@ -74,12 +74,12 @@
  static void
  sweet_log_thread(__unused void *arg, __unused wait_result_t wr)
 --- /dev/null
-+++ b/bsd/dev/sweet_wlan.c
-@@ -0,0 +1,483 @@
++++ b/bsd/dev/sailfish_wlan.c
+@@ -0,0 +1,498 @@
 +/*
 + * Pixel 1 Wi-Fi, stage 1: power the QCA6174 ("Rome") and bring up PCIe root
 + * complex 0, its only host interface, then read the chip's config-space ID.
-+ * Boot-arg sweetwlan=1 (off by default). Everything is logged ("SWEET WLAN:").
++ * Boot-arg sailfishwlan=1 (off by default). Everything is logged ("SAILFISH WLAN:").
 + *
 + * As the Pixel's own kernel (msm-3.18: cnss_pci.c, pci-msm.c; live DT
 + * qcom,cnss and qcom,pcie@600000, phy-ver 3, common PHY, rc 0):
@@ -108,7 +108,7 @@
 +extern bool sweet_pmic_read(uint16_t ppid, uint8_t addr, uint8_t *out);
 +extern bool sweet_pmic_write(uint16_t ppid, uint8_t addr, uint8_t val);
 +extern void sweet_log_kick(void);
-+void sweet_wlan_init(void);
++void sailfish_wlan_init(void);
 +
 +#define WL_GCC_PA       0x00300000u
 +#define WL_TLMM_PA      0x01010000u     /* one 4 KiB tile per GPIO: CFG +0, IN_OUT +4 */
@@ -123,6 +123,7 @@
 +#define WL_GPIO_BOOT    46u
 +#define WL_PMIC_ROME    0x0c8u          /* PM8994 GPIO 9 */
 +#define WL_PMIC_EN      0x0c7u          /* PM8994 GPIO 8 */
++#define WL_PMIC_SLEEP   0x0d1u          /* PM8994 GPIO 18: SLEEP_CLK2, the chip's 32 kHz clock */
 +
 +/* GCC (msm-clocks-hwio-8996.h) */
 +#define GCC_PCIE_0_SLV_AXI_CBCR         0x6b008u
@@ -198,7 +199,7 @@
 +static void
 +wl_step(const char *what)
 +{
-+	printf("SWEET WLAN: step %s\n", what);
++	printf("SAILFISH WLAN: step %s\n", what);
 +	sweet_log_kick();
 +	wl_msleep(300);
 +}
@@ -223,7 +224,7 @@
 +		delay(5);
 +	}
 +	if (halt_check) {
-+		printf("SWEET WLAN: clock %s stays off (cbcr %#x)\n", name, rd(wl_gcc, off));
++		printf("SAILFISH WLAN: clock %s stays off (cbcr %#x)\n", name, rd(wl_gcc, off));
 +	}
 +	return !halt_check;
 +}
@@ -236,12 +237,12 @@
 +	wr(wl_gcc, off, v & ~1u);
 +	for (int i = 0; i < 200; i++) {
 +		if (rd(wl_gcc, off) & (1u << 31)) {
-+			printf("SWEET WLAN: GDSC %s on (%#x -> %#x)\n", name, v, rd(wl_gcc, off));
++			printf("SAILFISH WLAN: GDSC %s on (%#x -> %#x)\n", name, v, rd(wl_gcc, off));
 +			return true;
 +		}
 +		delay(5);
 +	}
-+	printf("SWEET WLAN: GDSC %s FAILED (%#x -> %#x)\n", name, v, rd(wl_gcc, off));
++	printf("SAILFISH WLAN: GDSC %s FAILED (%#x -> %#x)\n", name, v, rd(wl_gcc, off));
 +	return false;
 +}
 +
@@ -268,14 +269,14 @@
 +	(void)sweet_pmic_read(ppid, 0x42, &pull0);
 +	(void)sweet_pmic_read(ppid, 0x45, &out);
 +	(void)sweet_pmic_read(ppid, 0x46, &en);
-+	/* Already a high output from the right source (ABL sets rome_vreg up): leave it. */
-+	bool ok = (mode == 0x11 && vin0 == vin && (en & 0x80)) ||
++	/* Already a high output (ABL sets rome_vreg up): leave it as it is. */
++	bool ok = (mode == 0x11 && (en & 0x80)) ||
 +	    (sweet_pmic_write(ppid, 0x41, vin) && sweet_pmic_write(ppid, 0x42, pull) &&
 +	    sweet_pmic_write(ppid, 0x40, 0x11) && sweet_pmic_write(ppid, 0x46, 0x80));
 +	uint8_t after = 0, vin1 = 0;
 +	(void)sweet_pmic_read(ppid, 0x40, &after);
 +	(void)sweet_pmic_read(ppid, 0x41, &vin1);
-+	printf("SWEET WLAN: PMIC %s (ppid %#x): mode %#x vin %#x pull %#x out %#x en %#x -> mode %#x vin %#x: %s\n",
++	printf("SAILFISH WLAN: PMIC %s (ppid %#x): mode %#x vin %#x pull %#x out %#x en %#x -> mode %#x vin %#x: %s\n",
 +	    name, ppid, mode, vin0, pull0, out, en, after, vin1, ok ? "high" : "WRITE FAILED");
 +	return ok;
 +}
@@ -385,11 +386,11 @@
 +	wl_clkreq = wl_map(WL_TLMM_PA + 0x1000u * WL_GPIO_CLKREQ, 0x1000);
 +	wl_wake = wl_map(WL_TLMM_PA + 0x1000u * WL_GPIO_WAKE, 0x1000);
 +	if (!wl_gcc || !wl_parf || !wl_phy || !wl_dbi || !wl_conf || !wl_perst || !wl_boot || !wl_clkreq || !wl_wake) {
-+		printf("SWEET WLAN: mapping failed\n");
++		printf("SAILFISH WLAN: mapping failed\n");
 +		return false;
 +	}
 +	/* Only TLMM and GCC here: PARF/PHY/DBI hang the bus until their clocks run. */
-+	printf("SWEET WLAN: before: perst cfg %#x io %#x, boot cfg %#x io %#x, gdsc pcie0 %#x aggre0 %#x\n",
++	printf("SAILFISH WLAN: before: perst cfg %#x io %#x, boot cfg %#x io %#x, gdsc pcie0 %#x aggre0 %#x\n",
 +	    rd(wl_perst, 0), rd(wl_perst, 4), rd(wl_boot, 0), rd(wl_boot, 4),
 +	    rd(wl_gcc, GCC_PCIE_0_GDSCR), rd(wl_gcc, GCC_AGGRE0_NOC_GDSCR));
 +	wl_step("rails");
@@ -398,7 +399,7 @@
 +	wl_tlmm_out(wl_perst, 0, 2, 1);
 +	wr(wl_clkreq, 0, (1u << 2) | 3u);       /* pci_e0, 2 mA, pull-up */
 +	wr(wl_wake, 0, 3u);                     /* GPIO input, 2 mA, pull-up */
-+	printf("SWEET WLAN: clkreq cfg %#x, wake cfg %#x\n", rd(wl_clkreq, 0), rd(wl_wake, 0));
++	printf("SAILFISH WLAN: clkreq cfg %#x, wake cfg %#x\n", rd(wl_clkreq, 0), rd(wl_wake, 0));
 +	wl_msleep(1);
 +
 +	/* Rails and the reference clock. */
@@ -407,8 +408,22 @@
 +	(void)sweet_rpm_ldoa(28, 925000);       /* PCIe PHY 0.9 V */
 +	(void)sweet_rpm_xo_buffer(8);           /* LN_BB_CLK */
 +
-+	/* The chip: vdd-wlan, bootstrap, WLAN_EN. */
++	/* The chip: vdd-wlan, sleep clock, bootstrap, WLAN_EN. */
 +	wl_step("chip power");
++	{
++		/* DT gpio@d100: output, vin-sel 2, src-sel 3 (func2 = SLEEP_CLK2), out-strength 2, CMOS */
++		uint8_t m = 0, v = 0, o = 0, e = 0;
++		(void)sweet_pmic_read(WL_PMIC_SLEEP, 0x40, &m);
++		(void)sweet_pmic_read(WL_PMIC_SLEEP, 0x41, &v);
++		(void)sweet_pmic_read(WL_PMIC_SLEEP, 0x45, &o);
++		(void)sweet_pmic_read(WL_PMIC_SLEEP, 0x46, &e);
++		bool ok = sweet_pmic_write(WL_PMIC_SLEEP, 0x41, 2) && sweet_pmic_write(WL_PMIC_SLEEP, 0x45, 0x02) &&
++		    sweet_pmic_write(WL_PMIC_SLEEP, 0x40, (1u << 4) | (3u << 1)) && sweet_pmic_write(WL_PMIC_SLEEP, 0x46, 0x80);
++		uint8_t m2 = 0;
++		(void)sweet_pmic_read(WL_PMIC_SLEEP, 0x40, &m2);
++		printf("SAILFISH WLAN: PMIC sleep_clk (ppid %#x): mode %#x vin %#x out %#x en %#x -> mode %#x: %s\n",
++		    WL_PMIC_SLEEP, m, v, o, e, m2, ok ? "on" : "WRITE FAILED");
++	}
 +	if (!wl_pmic_gpio_high("rome_vreg", WL_PMIC_ROME, 0, 5)) {    /* DT: vin-sel 0 */
 +		return false;
 +	}
@@ -449,7 +464,7 @@
 +		return false;
 +	}
 +	/* PHY resets pulsed (mainline qcom_qmp: assert, then deassert). */
-+	printf("SWEET WLAN: BCRs phy %#x com %#x nocsr %#x lane %#x, clkref %#x\n",
++	printf("SAILFISH WLAN: BCRs phy %#x com %#x nocsr %#x lane %#x, clkref %#x\n",
 +	    rd(wl_gcc, GCC_PCIE_PHY_BCR), rd(wl_gcc, GCC_PCIE_PHY_COM_BCR),
 +	    rd(wl_gcc, GCC_PCIE_PHY_NOCSR_COM_PHY_BCR), rd(wl_gcc, GCC_PCIE_0_PHY_BCR), rd(wl_gcc, GCC_PCIE_CLKREF_EN));
 +	wr(wl_gcc, GCC_PCIE_PHY_BCR, 1);
@@ -483,7 +498,7 @@
 +			wl_msleep(1);
 +		}
 +	}
-+	printf("SWEET WLAN: PHY %s (ready %#x, pipe cbcr %#x, C_READY %#x)\n", ready ? "ready" : "NOT READY",
++	printf("SAILFISH WLAN: PHY %s (ready %#x, pipe cbcr %#x, C_READY %#x)\n", ready ? "ready" : "NOT READY",
 +	    rd(wl_phy, PCIE_COM_PCS_READY_STATUS), rd(wl_gcc, GCC_PCIE_0_PIPE_CBCR), rd(wl_phy, 0x190));
 +	if (!ready) {
 +		return false;
@@ -507,12 +522,12 @@
 +		up = (sts & XMLH_LINK_UP) && (lnk & (1u << 29));
 +		uint32_t st = rd(wl_dbi, 0x728) & 0x3fu;        /* PORT_DEBUG0: LTSSM state */
 +		if (st != ltssm && seen++ < 24) {
-+			printf("SWEET WLAN: LTSSM %#x at %d ms (debug1 %#x, clkreq in %u, wake in %u)\n", st, i,
++			printf("SAILFISH WLAN: LTSSM %#x at %d ms (debug1 %#x, clkreq in %u, wake in %u)\n", st, i,
 +			    rd(wl_dbi, 0x72c), (rd(wl_clkreq, 4) & 1u), (rd(wl_wake, 4) & 1u));
 +		}
 +		ltssm = st;
 +	}
-+	printf("SWEET WLAN: link %s after PERST (elbi %#x, link status %#x, ltssm %#x, rc id %#x)\n",
++	printf("SAILFISH WLAN: link %s after PERST (elbi %#x, link status %#x, ltssm %#x, rc id %#x)\n",
 +	    up ? "UP" : "DOWN", sts, lnk, rd(wl_parf, PARF_LTSSM), rd(wl_dbi, 0));
 +	if (!up) {
 +		return false;
@@ -531,7 +546,7 @@
 +	wr(wl_dbi, DBI_IATU_VIEWPORT + 0x8, 1u << 31);          /* enable */
 +	__asm__ volatile ("dsb sy" ::: "memory");
 +	uint32_t id = rd(wl_conf, 0), rev = rd(wl_conf, 8);
-+	printf("SWEET WLAN: endpoint id %#x class/rev %#x bar0 %#x%s\n", id, rev, rd(wl_conf, 0x10),
++	printf("SAILFISH WLAN: endpoint id %#x class/rev %#x bar0 %#x%s\n", id, rev, rd(wl_conf, 0x10),
 +	    id == 0x003e168cu ? " = QCA6174" : "");
 +	return id == 0x003e168cu;
 +}
@@ -541,16 +556,16 @@
 +{
 +	wl_msleep(20000);       /* after boot: the log thread runs, iOS is up */
 +	bool ok = wl_bringup();
-+	printf("SWEET WLAN: stage 1 %s\n", ok ? "done: QCA6174 on PCIe" : "FAILED");
++	printf("SAILFISH WLAN: stage 1 %s\n", ok ? "done: QCA6174 on PCIe" : "FAILED");
 +	thread_terminate(current_thread());
 +}
 +
 +void
-+sweet_wlan_init(void)
++sailfish_wlan_init(void)
 +{
 +	int on = 0;
 +	thread_t thread;
-+	(void)PE_parse_boot_argn("sweetwlan", &on, sizeof(on));
++	(void)PE_parse_boot_argn("sailfishwlan", &on, sizeof(on));
 +	if (!on) {
 +		return;
 +	}
