@@ -10,22 +10,37 @@
  bsd/dev/sweet_spmi.c			standard
 --- a/bsd/dev/sweet_rpm.c
 +++ b/bsd/dev/sweet_rpm.c
-@@ -26,6 +26,7 @@
+@@ -26,6 +26,8 @@
  bool sweet_rpm_ldoa(unsigned ldo, uint32_t uv);
  bool sweet_rpm_clk(uint32_t type, uint32_t id, uint32_t khz);
  bool sweet_rpm_clk_scaling(void);
 +bool sweet_rpm_xo_buffer(uint32_t id);
++bool sweet_rpm_smpa(unsigned smps, uint32_t uv);
  
  static LCK_GRP_DECLARE(sweet_rpm_grp, "sweet_rpm");
  static LCK_MTX_DECLARE(sweet_rpm_lock, &sweet_rpm_grp);
-@@ -372,6 +373,21 @@
+@@ -372,10 +374,39 @@
  	bool ok = rpm_request("MX", 0, 0x61706d73u, 2, kv, 2);           /* "smpa" */
  	lck_mtx_unlock(&sweet_rpm_lock);
  	printf("SWEET RPM: MX corner %u: %s\n", corner, ok ? "ok" : "FAILED");
 +	return ok;
 +}
 +
-+/*
++/* Vote PM8994 SMPSn on at uv in the active set (RPM "smpa", like sweet_rpm_ldoa). */
++bool
++sweet_rpm_smpa(unsigned smps, uint32_t uv)
++{
++	uint32_t kv[4] = {0x6e657773u, 1u, 0x00007675u, uv};      /* swen = 1, uv */
++	char what[8];
++	snprintf(what, sizeof(what), "S%u", smps);
++	lck_mtx_lock(&sweet_rpm_lock);
++	bool ok = rpm_request(what, 0, 0x61706d73u, smps, kv, 2);      /* "smpa" */
++	lck_mtx_unlock(&sweet_rpm_lock);
++	printf("SWEET RPM: S%u %u uV: %s\n", smps, uv, ok ? "ok" : "FAILED");
+ 	return ok;
+ }
+ 
+ /*
 + * XO buffer (RPM "clka", Linux DEFINE_CLK_RPM_SMD_XO_BUFFER) on in the active
 + * set: key "Enab" = 1. id 8 = LN_BB_CLK, the PCIe reference clock.
 + */
@@ -37,9 +52,13 @@
 +	bool ok = rpm_request("xo buffer", 0, 0x616b6c63u, id, kv, 1);  /* "clka" */
 +	lck_mtx_unlock(&sweet_rpm_lock);
 +	printf("SWEET RPM: XO buffer %u on: %s\n", id, ok ? "ok" : "FAILED");
- 	return ok;
- }
- 
++	return ok;
++}
++
++/*
+  * Clock vote in the sleep and the active set, like a Linux clk-smd-rpm
+  * clock without an _a twin: type e.g. "clk2" (memory clocks: id 0 bimc =
+  * DDR), key "KHz ", rate in kHz; the RPM rounds to a supported rate. Takes
 --- a/bsd/dev/sweet_ufs.c
 +++ b/bsd/dev/sweet_ufs.c
 @@ -54,6 +54,7 @@
@@ -75,7 +94,7 @@
  sweet_log_thread(__unused void *arg, __unused wait_result_t wr)
 --- /dev/null
 +++ b/bsd/dev/sailfish_wlan.c
-@@ -0,0 +1,510 @@
+@@ -0,0 +1,515 @@
 +/*
 + * Pixel 1 Wi-Fi, stage 1: power the QCA6174 ("Rome") and bring up PCIe root
 + * complex 0, its only host interface, then read the chip's config-space ID.
@@ -83,8 +102,9 @@
 + *
 + * As the Pixel's own kernel (msm-3.18: cnss_pci.c, pci-msm.c; live DT
 + * qcom,cnss and qcom,pcie@600000, phy-ver 3, common PHY, rc 0):
-+ *   rails    RPM votes L30 1.8 V (xtal), L12 1.8 V + L28 0.925 V (PCIe PHY);
-+ *            S3/S4 (core/io) are always on. LN_BB XO buffer = PCIe refclk.
++ *   rails    RPM votes S3 1.3 V (vdd-wlan-core) and S4 1.8 V (vdd-wlan-io),
++ *            L30 1.8 V (xtal), L12 1.8 V + L28 0.925 V (PCIe PHY), in cnss
++ *            order (core, io, xtal). LN_BB XO buffer = PCIe refclk.
 + *   chip     PM8994 GPIO 9 (rome_vreg) high, 2 ms, TLMM 46 bootstrap high,
 + *            10 ms, PM8994 GPIO 8 (wlan_en) high, 10 ms.
 + *   PCIe     PERST (TLMM 35) low, GDSCs aggre0 noc + pcie_0, aux clock
@@ -105,6 +125,7 @@
 +extern kern_return_t thread_terminate(thread_t);
 +extern bool sweet_rpm_ldoa(unsigned ldo, uint32_t uv);
 +extern bool sweet_rpm_xo_buffer(uint32_t id);
++extern bool sweet_rpm_smpa(unsigned smps, uint32_t uv);
 +extern bool sweet_pmic_read(uint16_t ppid, uint8_t addr, uint8_t *out);
 +extern bool sweet_pmic_write(uint16_t ppid, uint8_t addr, uint8_t val);
 +extern void sweet_log_kick(void);
@@ -403,6 +424,9 @@
 +	wl_msleep(1);
 +
 +	/* Rails and the reference clock. */
++	(void)sweet_rpm_smpa(3, 1300000);       /* vdd-wlan-core */
++	(void)sweet_rpm_smpa(4, 1800000);       /* vdd-wlan-io */
++	delay(1000);
 +	(void)sweet_rpm_ldoa(30, 1800000);      /* WLAN xtal */
 +	(void)sweet_rpm_ldoa(12, 1800000);      /* PCIe PHY 1.8 V */
 +	(void)sweet_rpm_ldoa(28, 925000);       /* PCIe PHY 0.9 V */
