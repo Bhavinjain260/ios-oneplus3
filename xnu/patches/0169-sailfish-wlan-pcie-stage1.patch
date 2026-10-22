@@ -94,7 +94,7 @@
  sweet_log_thread(__unused void *arg, __unused wait_result_t wr)
 --- /dev/null
 +++ b/bsd/dev/sailfish_wlan.c
-@@ -0,0 +1,527 @@
+@@ -0,0 +1,532 @@
 +/*
 + * Pixel 1 Wi-Fi, stage 1: power the QCA6174 ("Rome") and bring up PCIe root
 + * complex 0, its only host interface, then read the chip's config-space ID.
@@ -464,12 +464,7 @@
 +		printf("SAILFISH WLAN: wlan_en and bootstrap held low: %s\n", ok ? "ok" : "WRITE FAILED");
 +		wl_msleep(100);
 +	}
-+	wl_tlmm_out(wl_boot, 1, 16, 1);         /* cnss_default: gpio, pull-down, driven high */
-+	wl_msleep(10);
-+	if (!wl_pmic_gpio_high("wlan_en", WL_PMIC_EN, 2, 4)) {      /* DT: vin-sel 2 (1.8 V), pull 4 (down) */
-+		return false;
-+	}
-+	wl_msleep(10);
++	/* The chip stays in reset until the PCIe side is ready (see below). */
 +
 +	/* Power domains, clocks, resets. */
 +	wl_step("gdsc + clocks");
@@ -551,10 +546,20 @@
 +	}
 +	printf("SAILFISH WLAN: lane %s (pcs status %#x, pipe cbcr %#x, com ready %#x)\n",
 +	    (pcs & (1u << 6)) ? "NOT UP" : "up", pcs, rd(wl_gcc, GCC_PCIE_0_PIPE_CBCR), rd(wl_phy, PCIE_COM_PCS_READY_STATUS));
++	/*
++	 * Now the chip, then PERST, as quickly as cnss + pci-msm do it (TWRP:
++	 * WLAN_EN high -> PERST release ~25 ms): the PCIe side is ready first.
++	 */
++	wl_step("chip on + link");
++	wl_tlmm_out(wl_boot, 1, 16, 1);         /* cnss_default: gpio, pull-down, driven high */
++	wl_msleep(10);
++	if (!wl_pmic_gpio_high("wlan_en", WL_PMIC_EN, 2, 4)) {      /* DT: vin-sel 2 (1.8 V), pull 4 (down) */
++		return false;
++	}
++	wl_msleep(10);                          /* WLAN_ENABLE_DELAY */
 +	wl_msleep(10);                          /* qcom,ep-latency */
 +
 +	/* Endpoint out of reset, link training. */
-+	wl_step("link");
 +	wl_tlmm_out(wl_perst, 1, 2, 1);
 +	wl_msleep(1);
 +	wr(wl_dbi, DBI_DEVICE_CONTROL_STATUS,
