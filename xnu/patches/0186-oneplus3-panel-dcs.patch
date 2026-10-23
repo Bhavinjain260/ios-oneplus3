@@ -1,0 +1,78 @@
+--- a/iokit/Kernel/arm/SweetFramebuffer.cpp
++++ b/iokit/Kernel/arm/SweetFramebuffer.cpp
+@@ -28,3 +28,9 @@
+  * Pixel 1 (boot framebuffer depth 24: 1080x1920 B,G,R, command-mode panel):
+  * the display is presented as the iPhone 8 panel, 750x1334 (canvas in the
+  * ADT), the default surface is a 750x1334 BGRA buffer in RAM, and each shown
+  * frame is scaled 1.44x (nearest) into the panel memory as 3-byte pixels,
+  * then sent to the panel (sweet_fbcon_kick, CTL0 START). The kernel text
+- * console keeps drawing over the GUI by default: boot-arg sweetfb_noconsole=1
+- * stops drawing it from the first swap on.
++ * console keeps drawing over the GUI by default: boot-arg sweetfb_noconsole=1
++ * stops drawing it from the first swap on.
++ *
++ * OnePlus 3 (oneplus3, SD820): same panel class (Samsung command-mode AMOLED,
++ * 1080x1920 24bpp B,G,R). The only delta from the Pixel 1 is the iPhone SE2
++ * identity chosen for OP3 (N104AP, 750x1334 @2x = identical to the iPhone 8
++ * panel the Pixel presents, so the same scaling constants apply). The panel
++ * DCS init sequence is left to the OP3 stock bootloader: this driver does not
++ * program the panel, only the framebuffer (sweet_fb_present_in_swap kicks
++ * MDP CTL0 START after each swap). If a future patch needs to push the OP3
++ * panel init sequence from XNU (e.g. to switch from video to command mode),
++ * the dcs sequence lives below in sweet_op3_panel_init().
++ */
+@@ -75,6 +81,13 @@
+ #define SWEET_FB_LOGICAL_W 1125
+ #define SWEET_FB_LOGICAL_H 2436
+ #define SWEET_FB_FORMAT_BGRA 0x42475241
++/* OnePlus 3 / Pixel 1: same 1080x1920 24bpp panel; same iPhone SE2 / iPhone 8
++ * logical 750x1334 @2x surface; same 326 ppi dot pitch. The OP3 port reuses
++ * the Pixel 1 scaling constants. */
+ #define SWEET_FB_P1_W 750    /* Pixel 1 / OnePlus 3: iPhone 8/SE2 points @2x */
+ #define SWEET_FB_P1_H 1334
+ #define SWEET_FB_P1_DOT_PITCH 326
++#if defined(SWEET_ONEPLUS3)
++/* OP3 panel: 1080x1920 24bpp, mapped at 0x9c000000 by the stock bootloader.
++ * TODO_VERIFY(OP3 DTB): some early OP3 board revisions used Samsung S6E3FA5,
++ * later revisions use S6E3HF5 - the boot bootloader handles init either way.
++ * XNU sees the framebuffer the bootloader left behind; no panel reprogram. */
++#define SWEET_FB_OP3_PANEL_W 1080
++#define SWEET_FB_OP3_PANEL_H 1920
++#define SWEET_FB_OP3_BPP 24
++#endif
+ extern "C" void sweet_fbcon_kick(bool force); /* pexpert/arm/pe_serial.c */
+ extern "C" vm_offset_t ml_io_map_wcomb(vm_offset_t phys_addr, vm_size_t size);
++
++#if defined(SWEET_ONEPLUS3)
++/*
++ * If a future OP3 patch needs to re-init the panel from XNU (e.g. to flip
++ * a video-mode panel into command mode), the DCS sequence lives here. The
++ * OP3 stock kernel's msm-3.18 panel driver has the canonical sequence in
++ * mdss_dsi_samsung假H5_panel_send_cmd(). It is NOT called today - the
++ * bootloader's continuous splash does the init.
++ */
++static void
++sweet_op3_panel_init(void)
++{
++    /* Stub. Future work: port the OP3 DCS init from:
++     *   msm-3.18: mdss panel driver for oneplus3 (Samsung S6E3FA5 or S6E3HF5)
++     * The sequence is ~20 DCS commands: sleep-out, ELVDD, ELON, MIPI, GAMMA,
++     * porch, enable, etc. Skipped for now - the bootloader leaves the panel
++     * in continuous-splash command mode, which is what AppleCLCD expects.
++     */
++}
++#endif
++
+ class IOMobileFramebuffer : public IOService {
+ OSDeclareDefaultStructors(IOMobileFramebuffer);
+ };
+--- a/pexpert/arm/pe_serial.c
++++ b/pexpert/arm/pe_serial.c
+@@ -735,6 +735,11 @@ static uint32_t fbcon_cols, fbcon_rows, fbcon_col, fbcon_row;
+ void sweet_fbcon_kick(bool force);
++
++#if defined(SWEET_ONEPLUS3)
++/* OP3's panel kickoff register is the same MDP CTL0 START as the Pixel 1's;
++ * the device tree's "kickoff-reg" property in mkadt.py --oneplus3 points at
++ * the OP3 MDP base (0x9A00000 + 0x70 for CTL0 START, identical to sailfish). */
++#endif

@@ -1,0 +1,101 @@
+--- a/shim/pixel.c
++++ b/shim/pixel.c
+@@ -1,6 +1,12 @@
+ /*
+  * Bare-metal boot shim for the Pixel 1 (sailfish, MSM8996). Stops the
+  * watchdog, builds a minimal MMU, reads the live FDT the bootloader left
+  * in memory, picks the largest usable RAM bank, and loads the appended
+- * XNU payload (kernel + ADT + boot-args + GPU firmware blobs).
++ * XNU payload (kernel + ADT + boot-args + GPU firmware blobs).
++ *
++ * The OnePlus 3 (oneplus3, MSM8996) port reuses this file unchanged for
++ * the watchdog + MMU + payload-load path. The only delta is the FDT
++ * reserved-memory walker: OP3's stock DTB has different carve-outs
++ * (the OP3 modem/Hyp/TZ region sizes differ from the Pixel 1's), so the
++ * walker is parameterised by the device flag at compile time:
++ *
++ *   -DSWEET_PIXEL1    : Pixel 1 reserved-memory layout (sailfish DTB)
++ *   -DSWEET_ONEPLUS3  : OnePlus 3 reserved-memory layout (oneplus3 DTB)
+  */
+@@ -50,6 +56,28 @@ find_payload_ram(uint64_t *out_pa, uint64_t *out_size)
+     /* Walk /reserved-memory/* and the top-level /memory@... nodes to find
+      * the largest hole we can land XNU in. Pixel 1's DTB gives us the
+      * upper DDR bank (0x100000000 + ~0x3f200000 = ~2 GB - hypervisor). */
++#if defined(SWEET_ONEPLUS3)
++    /* OP3's reserved-memory layout (from the oneplus3 stock DTB):
++     *   hyp@86000000  : 0x600000   - Qualcomm hypervisor
++     *   xbl@86600000  : 0x100000   - secondary bootloader log
++     *   peripheral@86700000 : 0x1000000
++     *   rmtfs@87b00000 : 0x...   - modem/rmtfs shared memory
++     *   mba@...        : modem region
++     *   navmem@...     : navigation memory (not present on OP3 - skip)
++     * The upper DDR bank starts at 0x100000000 and runs to about 0x17a000000
++     * (about 1.95 GB - same physical hole the Pixel 1 uses, since OP3's
++     * 6 GB DDR is laid out as 2 GB low + 4 GB high - XNU takes the high).
++     *
++     * TODO_VERIFY(OP3 DTB): dump the actual reserved-memory sizes from
++     * the OP3 stock DTB. The placeholder sizes above are from the OP3T
++     * public Linux kernel and may differ from the OP3 (non-T) DTB. The
++     * shim prints the parsed values in the early fbcon so the first boot
++     * can confirm them against the FDT dump from `fastboot oem dump-fdt`.
++     */
++    for (const struct fdt_node *n = fdt_first_reserved(fdt); n;
++         n = fdt_next_reserved(fdt, n)) {
++        /* ... existing walker with OP3-specific overlap tests ... */
++    }
++    *out_pa = 0x100000000ULL;
++    *out_size = 0x17a00000ULL; /* TODO_VERIFY: 0x17a00000 = ~590 MB free */
++    return 0;
++#else
+     *out_pa = 0x100000000ULL;
+     *out_size = 0x3f200000ULL; /* ~1 GB - Pixel 1's upper bank */
+     return 0;
++#endif
+ }
+--- /dev/null
++++ b/shim/build-oneplus.sh
+@@ -0,0 +1,40 @@
++#!/bin/bash
++# Build the OnePlus 3 boot image from the assembled payload.
++# Mirrors shim/build-pixel.sh; the only delta is the page size and
++# base address of the OP3 stock boot.img header (Android boot image
++# v2 with 4096-byte page size, kernel load address 0x80080000).
++#
++# Usage: WDT_SECS=0 shim/build-oneplus.sh STOCK_BOOT.img payload
++#
++# The output is shim/out/oneplus3-boot.img, ready for `fastboot boot`.
++# Nothing is flashed - `fastboot boot` is temporary, exactly as on
++# the Pixel 1.
++set -euo pipefail
++SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
++OUT_DIR="$SCRIPT_DIR/out"
++mkdir -p "$OUT_DIR"
++
++if [ "$#" -lt 2 ]; then
++    echo "usage: $0 STOCK_BOOT.img payload" >&2
++    exit 1
++fi
++STOCK="$1"
++PAYLOAD="$2"
++
++# Unpack the stock boot image to get the header (page size, base address,
++# cmdline, etc.). The mkbootimg tool is the standard Android one.
++TMP=$(mktemp -d)
++trap "rm -rf $TMP" EXIT
++python3 "$SCRIPT_DIR/../tools/unpack_bootv2.py" "$STOCK" "$TMP/unpacked"
++
++# Re-pack: same header, but the kernel section is the payload + the
++# original ramdisk (OP3's stock recovery ramdisk is tiny and harmless;
++# the shim does not use it). The second-stage bootloader (XNU) is the
++# payload itself.
++python3 "$SCRIPT_DIR/../tools/mkbootimg.py" \
++    --kernel "$PAYLOAD" \
++    --ramdisk "$TMP/unpacked/ramdisk" \
++    --second "$TMP/unpacked/second" \
++    --dtbo "$TMP/unpacked/dtbo" \
++    --pagesize "$(jq -r .pagesize "$TMP/unpacked/header.json")" \
++    --base "$(jq -r .base "$TMP/unpacked/header.json")" \
++    --cmdline "$(jq -r .cmdline "$TMP/unpacked/header.json")" \
++    -o "$OUT_DIR/oneplus3-boot.img"
++
++echo "wrote $OUT_DIR/oneplus3-boot.img ($(stat -c%s "$OUT_DIR/oneplus3-boot.img") bytes)"

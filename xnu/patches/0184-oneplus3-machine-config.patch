@@ -1,0 +1,73 @@
+--- a/pexpert/arm/SWEET.h
++++ b/pexpert/arm/SWEET.h
+@@ -1,6 +1,6 @@
+ /*
+- * SWEET machine configuration. Original target: Redmi Note 10 Pro (sweet,
+- * SM7150, Snapdragon 732G). Pixel 1 (sailfish, MSM8996Pro, SD821) reuses this
+- * config; only the device-tree-drawn MMIO bases differ.
++ * SWEET machine configuration. Original target: Redmi Note 10 Pro (sweet,
++ * SM7150). Reused, unmodified, by the Pixel 1 (sailfish, SD821) and the
++ * OnePlus 3 (oneplus3, SD820) ports. Both reuse the same ARMv8.0 / non-PAC
++ * baseline (Kryo custom cores, no PAC, no LSE atomics enforced) and only
++ * differ in the device-tree-drawn MMIO bases and GPIO assignments.
+  */
+ #ifndef _PE_SWEET_H
+ #define _PE_SWEET_H
+--- a/osfmk/arm64/config/MASTER.arm64.sweet
++++ b/osfmk/arm64/config/MASTER.arm64.sweet
+@@ -23,7 +23,7 @@ arm64_boost_defines += -DARM64_BOARD_CONFIG_SWEET -DSWEET -DCONFIG_BUILD
+ /*
+- * Pixel 1 (sailfish) additions applied on top of SWEET. The flag is named
+- * SWEET_PIXEL1 throughout the kernel because the machine config is shared.
++ * Device-specific flags applied on top of SWEET. The flag is named
++ * SWEET_PIXEL1 / SWEET_ONEPLUS3 throughout the kernel; the machine config
++ * is shared because the underlying SoC family (MSM8996 / Kryo) is shared.
+  * Set SWEET_PIXEL1 for the Pixel 1 and SWEET_ONEPLUS3 for the OnePlus 3.
+  */
+-arm64_boost_defines += -DSWEET_PIXEL1
++arm64_boost_defines += -DSWEET_PIXEL1 -DSWEET_ONEPLUS3
+--- a/pexpert/arm/pe_fiq.c
++++ b/pexpert/arm/pe_fiq.c
+@@ -19,7 +19,7 @@ MACHINE_TIMEOUT(gicr_wake_timeout_ns, "gicr-wake-timeout", GICR_WAKE_TIMEOUT_NS,
+-#if defined(SWEET)
++/* SWEET covers the sweet / sailfish / oneplus3 ports. */
++#if defined(SWEET)
+ /* Phone default; QEMU virt wires the architected virtual timer to INTID 27. */
+ SECURITY_READ_ONLY_LATE(uint32_t) sweet_vtimer_intid = SWEET_VTIMER_INTID;
+ /* Redistributor frame stride, ADT gic "redistributor-stride" (Pixel 1: 0x40000,
+- * OnePlus 3: 0x40000 - same SoC family, same GIC-500 stride). */
++ * OnePlus 3: 0x40000 - same SoC family, same GIC-500 stride). */
+ SECURITY_READ_ONLY_LATE(static uint32_t) sweet_gicr_stride = GICR_PE_SIZE;
+--- a/bsd/dev/sweet_touch.c
++++ b/bsd/dev/sweet_touch.c
+@@ -1,4 +1,4 @@
+-#if defined(ARM64_BOARD_CONFIG_SWEET)
++#if defined(ARM64_BOARD_CONFIG_SWEET) && !defined(SWEET_ONEPLUS3)
+ /* The Pixel 1 (sailfish) touch path: Synaptics S3708 RMI4 on BLSP1 QUP3
+  * at I2C 0x20. The OnePlus 3 has its own driver (bsd/dev/oneplus_touch.c)
+  * selected by SWEET_ONEPLUS3, since the BLSP QUP, GPIO and rail IDs differ.
+  */
+ #include <sys/param.h>
+@@ -800,3 +800,3 @@
+-#if defined(ARM64_BOARD_CONFIG_SWEET)
++#if defined(ARM64_BOARD_CONFIG_SWEET)
+ void sweet_touch_init(void);
+--- a/bsd/dev/sweet_keys.c
++++ b/bsd/dev/sweet_keys.c
+@@ -1,4 +1,4 @@
+-#if defined(ARM64_BOARD_CONFIG_SWEET)
++#if defined(ARM64_BOARD_CONFIG_SWEET) && !defined(SWEET_ONEPLUS3)
+ /* The Pixel 1 (sailfish) keys path. The OnePlus 3 has its own keys driver
+  * selected by SWEET_ONEPLUS3, since OP3 has a real hardware Home button
+  * (capacitive, fed through the touch IC's F30 function) and does not need
+  * the Pixel 1 trick of mapping volume-down to Home.
+  */
+--- a/bsd/dev/oneplus3_touch.c
++++ b/bsd/dev/oneplus3_touch.c
+@@ -0,0 +1,1 @@
++/* Stub file. The OnePlus 3 touch driver lives here, added by patch
++ * 0185-oneplus3-touch-rmi4.patch. It is selected at compile time by
++ * the SWEET_ONEPLUS3 define (see bsd/conf/MASTER.arm64.sweet). */
++#if defined(ARM64_BOARD_CONFIG_SWEET) && defined(SWEET_ONEPLUS3)
++#include "oneplus3_touch_impl.c"
++#endif

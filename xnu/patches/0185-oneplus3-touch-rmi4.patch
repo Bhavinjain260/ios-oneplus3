@@ -1,0 +1,536 @@
+--- /dev/null
++++ b/bsd/dev/sweet_touch.c
+@@ -0,0 +1,540 @@
++/*
++ * OnePlus 3 (oneplus3, SD820 / MSM8996) touch: Synaptics S1302 (a.k.a.
++ * S3320 in marketing materials; the chip self-reports as S1302 via RMI4's
++ * F01 query - confirmed via the OP3 stock kernel's /proc/s1302/ directory)
++ * at I2C 0x20 on BLSP1 QUP4 (0x07578000), polled.
++ *
++ * This is a near-twin of the Pixel 1 path in patch 0096. RMI4 is RMI4;
++ * the only deltas vs. sailfish are:
++ *
++ *   - BLSP QUP base:    Pixel 1 0x07577000 (QUP3) -> OP3 0x07578000 (QUP4)
++ *   - GCC QUP CBCR:    Pixel 1 0x0031d000 (QUP3) -> OP3 0x0031e000 (QUP4)
++ *     (the BLSP1 AHB vote at 0x00352004 bit 17 is shared between them)
++ *   - SDA / SCL GPIOs: Pixel 1 47/48 function 3 (blsp_i2c3)
++ *                      -> OP3 22/23 function 2 (blsp_i2c4)
++ *   - Reset GPIO:      Pixel 1 89 -> OP3 62  (active low on both)
++ *   - Attention GPIO:  Pixel 1 125 -> OP3 45  (active low on both)
++ *   - Touch rail:      Pixel 1 LDO on the display rail (no PMIC vote)
++ *                      -> OP3 PMI8994 LDO5 (still display-shared on most
++ *                      OP3 board revisions; no PMIC vote needed here
++ *                      either, matching the sailfish approach in 0100)
++ *
++ * Verified constants (from Gaurav241/device_oneplus_oneplus3):
++ *   - Touch IC identity: Synaptics S1302 (per /proc/s1302/ paths in
++ *     lineagehw/touch/KeyDisabler.cpp, KeySwapper.cpp, TouchscreenGesture.cpp)
++ *   - Kernel base 0x80000000, page size 4096 (per BoardConfig.mk)
++ *   - Kernel cmdline includes 'androidboot.hardware=qcom user_debug=31 ...'
++ *   - Boot partition 64 MB, userdata 53.5 GB
++ *
++ * Still DTB-dependent (the OP3 kernel image is Image.gz-dtb, so the DTB
++ * is embedded in the stock boot.img - the user with hardware dumps it
++ * via tools/unpack_bootv2.py backup/boot.img dtb/boot_unpacked):
++ *   - BLSP1 QUP4 base (draft 0x07578000)
++ *   - SDA / SCL GPIOs (draft 22 / 23 function 2 = blsp_i2c4)
++ *   - Reset GPIO (draft 62)
++ *   - Attention GPIO (draft 45)
++ *   - F12 max-x / max-y (draft 1079 / 1919)
++ * Each is MARKED TODO_VERIFY(OP3 DTB) below with the DTB property to check.
++ *
++ * Same RMI4 protocol as the Pixel: PDT scan on page 0, F12 layout from
++ * query 5/8 like Linux synaptics_dsx_core.c synaptics_rmi4_f12_init.
++ * Coordinates are panel pixels (F12 max 1079 x 1919 - same panel
++ * resolution as the Pixel). Writes to the IC: the page select, the F01
++ * interrupt enable.
++ *
++ * The OP3 stock kernel exposes the capacitive back/home/recents keys via
++ *   /proc/s1302/virtual_key (enable/disable) - KeyDisabler.cpp
++ *   /proc/s1302/key_rep        (swap back/recents) - KeySwapper.cpp
++ *   /proc/touchpanel/<gesture>_enable (gestures)   - TouchscreenGesture.cpp
++ * These are sysfs paths the OP3 Synaptics DSX kernel driver creates on top
++ * of RMI4's F30 (capacitive buttons) function. The SWEET_ONEPLUS3 touch
++ * driver in this file does NOT create these paths; if a future patch needs
++ * to expose them, it would query F30 in the same PDT scan that already
++ * finds F01 and F12, and deliver the three capacitive keys as HID events.
++ */
++#if defined(ARM64_BOARD_CONFIG_SWEET) && defined(SWEET_ONEPLUS3)
++#include <sys/param.h>
++#include <sys/systm.h>
++#include <sys/conf.h>
++#include <kern/thread.h>
++#include <mach/mach_types.h>
++#include <pexpert/device_tree.h>
++
++extern vm_offset_t ml_io_map(vm_offset_t, vm_size_t);
++/* Mach MIG declaration is not included by BSD's exported thread.h. */
++extern kern_return_t thread_terminate(thread_t);
++extern void sweet_hid_touch(int finger, int down, int x, int y);
++void sweet_touch_init(void);
++
++/* TODO_VERIFY(OP3 DTB): the QUP4 base on msm-3.18 oneplus3 is 0x07578000. */
++#define TOUCH_GCC_VOTE_PA 0x00352000u        /* +4: APCS_CLOCK_BRANCH_ENA_VOTE */
++#define TOUCH_GCC_QUP_PA  0x0031e000u        /* +8: QUP4 I2C CBCR, +0x20: RCGR */
++/* TODO_VERIFY: 0x07578000 is the BLSP1 QUP4 base on msm-3.18. */
++#define TOUCH_QUP_PA      0x07578000u
++#define TOUCH_TLMM_PA    0x01010000u         /* one 4 KiB tile per GPIO: CFG +0, IN_OUT +4 */
++/* TODO_VERIFY(OP3 DTB): pinmux@1010000 blsp_i2c4 SDA=22 SCL=23 function 2. */
++#define TOUCH_SDA   22u
++#define TOUCH_SCL   23u
++/* TODO_VERIFY(OP3 DTB): reset GPIO 62 (active low) - oneplus3 DTB "reset-gpio". */
++#define TOUCH_RESET 62u
++/* TODO_VERIFY(OP3 DTB): attention GPIO 45 (active low) - oneplus3 DTB "irq-gpio". */
++#define TOUCH_ATTN  45u
++#define TOUCH_ADDR  0x20u                    /* RMI4 default; same as Pixel 1 */
++#define TOUCH_MAX   10u
++
++/* QUP registers (mainline i2c-qup.c) */
++#define QUP_CONFIG         0x000u
++#define QUP_STATE          0x004u
++#define QUP_IO_MODE        0x008u
++#define QUP_SW_RESET       0x00cu
++#define QUP_OPERATIONAL    0x018u
++#define QUP_ERROR_FLAGS    0x01cu
++#define QUP_HW_VERSION     0x030u
++#define QUP_MX_OUTPUT_CNT  0x100u
++#define QUP_OUT_FIFO       0x110u
++#define QUP_MX_WRITE_CNT   0x150u
++#define QUP_MX_INPUT_CNT   0x200u
++#define QUP_MX_READ_CNT    0x208u
++#define QUP_IN_FIFO         0x218u
++#define QUP_I2C_CLK_CTL    0x400u
++#define QUP_I2C_STATUS     0x404u
++#define QUP_I2C_MASTER_GEN 0x408u
++
++#define QUP_STATE_RESET    0u
++#define QUP_STATE_RUN      1u
++#define QUP_STATE_PAUSE    3u
++#define QUP_STATE_VALID    (1u << 2)
++#define QUP_STATE_MASTER   (1u << 4)
++#define QUP_IN_NOT_EMPTY   (1u << 5)
++#define QUP_OUT_SVC        (1u << 8)
++#define QUP_IN_SVC         (1u << 9)
++#define QUP_MX_OUTPUT_DONE (1u << 10)
++#define QUP_NO_INPUT       (1u << 7)
++#define QUP_MINI_CORE      (2u << 8)
++#define QUP_N_VAL          15u
++#define QUP_REPACK_EN      (3u << 14)
++#define QUP_TAG_START      (1u << 8)
++#define QUP_TAG_DATA       (2u << 8)
++#define QUP_TAG_STOP       (3u << 8)
++#define QUP_TAG_REC        (4u << 8)
++#define QUP_BUS_ACTIVE     (1u << 8)
++#define QUP_BUS_ERRORS     0x38000fcu
++#define QUP_ERRORS         0x7cu
++/* 400 kHz from 19.2 MHz: fs_div = (48 - 6) * 2 / 3 = 28, hs_div 3, 33/66 duty */
++#define QUP_CLK_400K       ((14u << 16) | (3u << 8) | 28u)
++
++static int touch_sleep_chan;
++
++static struct {
++       bool started;
++       vm_offset_t vote, gccqup, qup, gpio[4];
++       unsigned rx_max;          /* data bytes per read that fit the input FIFO */
++       uint8_t f01_data, f01_ctrl, f12_data, f12_ctrl, f12_query;
++       uint8_t f12_data1, f12_data15, f12_bit, irq_bytes;
++       unsigned objects;
++       uint32_t active;
++       int x[TOUCH_MAX], y[TOUCH_MAX];
++       uint32_t last_status, last_err;
++} st;
++
++static uint32_t
++touch_rd(vm_offset_t base, uint32_t off)
++{
++       __asm__ volatile("dmb ishld" ::: "memory");
++       return *(volatile uint32_t *)(base + off);
++}
++
++static void
++touch_wr(vm_offset_t base, uint32_t off, uint32_t v)
++{
++       *(volatile uint32_t *)(base + off) = v;
++       __asm__ volatile("dmb ishst" ::: "memory");
++}
++
++static void
++touch_delay(unsigned us)
++{
++       /* AbsoluteDelay is in microseconds; this matches delay() on osfmk. */
++       delay(us);
++}
++
++/* idx into st.gpio: 0 SDA, 1 SCL, 2 reset, 3 attention */
++static void
++touch_gpio(unsigned idx, unsigned func, unsigned pull, bool out, bool high)
++{
++       vm_offset_t t = st.gpio[idx];
++       if (out) {
++               touch_wr(t, 4, high ? 2u : 0u); /* latch first: reset is active low */
++       }
++       touch_wr(t, 0, (func << 2) | pull | (out ? 0x200u : 0u)); /* 2 mA */
++}
++
++static bool
++touch_clocks(void)
++{
++       touch_wr(st.vote, 4, touch_rd(st.vote, 4) | (1u << 17)); /* BLSP1 AHB */
++       touch_wr(st.gccqup, 8, touch_rd(st.gccqup, 8) | 1u);     /* QUP4 I2C */
++       for (unsigned i = 0; i < 1000; i++) {
++               if (!(touch_rd(st.gccqup, 8) & (1u << 31))) {
++                       printf("SWEET TOUCH: clocks on (vote=%#x cbcr=%#x rcgr=%#x/%#x)\n",
++                           touch_rd(st.vote, 4), touch_rd(st.gccqup, 8),
++                           touch_rd(st.gccqup, 0x20), touch_rd(st.gccqup, 0x24));
++                       return true;
++               }
++               delay(1);
++       }
++       printf("SWEET TOUCH: QUP4 I2C clock stays off (cbcr=%#x)\n",
++           touch_rd(st.gccqup, 8));
++       return false;
++}
++
++static bool
++qup_state(uint32_t state)
++{
++       for (unsigned i = 0; i < 100; i++) {
++               uint32_t s = touch_rd(st.qup, QUP_STATE);
++               if ((s & QUP_STATE_VALID) && (s & 3u) == state) {
++                       return true;
++               }
++               if (s & QUP_STATE_VALID) {
++                       touch_wr(st.qup, QUP_STATE, state);
++               }
++               delay(1);
++       }
++       return false;
++}
++
++/*
++ * One message: write `len` bytes (STOP after the last) or read `len` bytes.
++ * Returns 0, ENXIO on NACK, EIO on other errors/timeouts.
++ */
++static int
++qup_msg(bool rd, uint8_t *buf, unsigned len)
++{
++       unsigned tx = rd ? 2u : len + 1u;
++       uint32_t a8 = (TOUCH_ADDR << 1) | (rd ? 1u : 0u);
++       if (!qup_state(QUP_STATE_RESET) ||
++           !(touch_rd(st.qup, QUP_STATE) & QUP_STATE_MASTER)) {
++               return EIO;
++       }
++       touch_wr(st.qup, QUP_MX_OUTPUT_CNT, 0);
++       touch_wr(st.qup, QUP_MX_WRITE_CNT, tx);
++       touch_wr(st.qup, QUP_MX_INPUT_CNT, 0);
++       touch_wr(st.qup, QUP_MX_READ_CNT, rd ? len + 2u : 0);
++       touch_wr(st.qup, QUP_IO_MODE, 0);
++       touch_wr(st.qup, QUP_OPERATIONAL, 0);
++       touch_wr(st.qup, QUP_ERROR_FLAGS, QUP_ERRORS | QUP_BUS_ERRORS);
++       if (!qup_state(QUP_STATE_RUN)) {
++               return EIO;
++       }
++       /* Issue the address byte with the START tag. */
++       touch_wr(st.qup, QUP_OUT_FIFO, (a8) | (rd ? QUP_TAG_REC : QUP_TAG_START));
++       if (!rd) {
++               for (unsigned i = 0; i < len; i++) {
++                       uint32_t tag = (i + 1u == len) ? QUP_TAG_STOP : QUP_TAG_DATA;
++                       touch_wr(st.qup, QUP_OUT_FIFO, buf[i] | tag);
++               }
++       } else {
++               /* Read: STOP tag after the receive count. */
++               touch_wr(st.qup, QUP_OUT_FIFO, len | QUP_TAG_STOP);
++       }
++       uint32_t deadline = 5000;
++       for (;;) {
++               uint32_t s = touch_rd(st.qup, QUP_OPERATIONAL);
++               if (s & (QUP_MX_OUTPUT_DONE | QUP_IN_SVC | QUP_OUT_SVC)) {
++                       touch_wr(st.qup, QUP_OPERATIONAL, s);
++               }
++               if (rd && (s & QUP_IN_SVC)) {
++                       /* Drain. The first byte is the address echo. */
++                       (void)touch_rd(st.qup, QUP_IN_FIFO);
++                       for (unsigned i = 0; i < len; i++) {
++                               buf[i] = touch_rd(st.qup, QUP_IN_FIFO) & 0xffu;
++                       }
++                       return 0;
++               }
++               if (!rd && (s & QUP_MX_OUTPUT_DONE)) {
++                       return 0;
++               }
++               if (touch_rd(st.qup, QUP_ERROR_FLAGS) & QUP_ERRORS) {
++                       return ENXIO; /* NACK or bus error */
++               }
++               if (--deadline == 0) {
++                       return EIO;
++               }
++               delay(1);
++       }
++}
++
++static int
++touch_read(uint8_t addr, uint8_t *buf, unsigned len)
++{
++       /* Page-select register write first, then the read. */
++       if (qup_msg(false, &addr, 1)) {
++               return EIO;
++       }
++       return qup_msg(true, buf, len);
++}
++
++static int
++touch_write(uint8_t addr, uint8_t v)
++{
++       uint8_t buf[2] = { addr, v };
++       return qup_msg(false, buf, sizeof(buf));
++}
++
++static int
++touch_write_buf(uint8_t addr, const uint8_t *buf, unsigned len)
++{
++       uint8_t tmp[64];
++       if (len + 1 > sizeof(tmp)) {
++               return EIO;
++       }
++       tmp[0] = addr;
++       for (unsigned i = 0; i < len; i++) {
++               tmp[i + 1] = buf[i];
++       }
++       return qup_msg(false, tmp, len + 1);
++}
++
++/* RMI4 PDT scan: find function F01 (device control), F12 (2D sensor). */
++static int
++touch_scan_pdt(void)
++{
++       uint8_t f01 = 0xff, f12 = 0xff;
++       for (unsigned page = 0; page < 4; page++) {
++               if (touch_write(0xff, (uint8_t)page)) {
++                       return EIO;
++               }
++               for (unsigned pdt = 0xe9; pdt >= 0x07; pdt -= 6) {
++                       uint8_t entry[6];
++                       if (touch_read(pdt, entry, sizeof(entry))) {
++                               continue;
++                       }
++                       if (entry[5] == 0) {
++                               continue; /* end-of-PDT marker */
++                       }
++                       if (entry[5] == 0x01) {
++                               f01 = page;
++                               st.f01_data  = entry[3];
++                               st.f01_ctrl  = entry[2];
++                               st.irq_bytes = (entry[1] & 7u) + 1u;
++                       } else if (entry[5] == 0x12) {
++                               f12 = page;
++                               st.f12_data  = entry[3];
++                               st.f12_ctrl  = entry[2];
++                               st.f12_query = entry[1];
++                       }
++               }
++       }
++       if (f01 == 0xff || f12 == 0xff) {
++               printf("SWEET TOUCH: PDT scan failed (f01=%02x f12=%02x)\n", f01, f12);
++               return ENXIO;
++       }
++       st.f12_data1 = st.f12_data + 1; /* F12 Data1 immediately follows Data0 */
++       st.f12_data15 = st.f12_data1 + 1;
++       printf("SWEET TOUCH: PDT done f01@page %u (data %#x ctrl %#x irq-bytes %u) "
++           "f12@page %u (data %#x ctrl %#x query %#x)\n",
++           f01, st.f01_data, st.f01_ctrl, st.irq_bytes,
++           f12, st.f12_data, st.f12_ctrl, st.f12_query);
++       return 0;
++}
++
++static int
++touch_f12_layout(void)
++{
++       if (touch_write(0xff, 0)) {
++               return EIO;
++       }
++       uint8_t q5[8];
++       if (touch_read(st.f12_query + 5, q5, sizeof(q5))) {
++               return EIO;
++       }
++       uint8_t q8[3];
++       if (touch_read(st.f12_query + 8, q8, sizeof(q8))) {
++               return EIO;
++       }
++       st.f12_bit = q5[0];
++       unsigned obj = q5[1] | (q5[2] << 8);
++       if (obj > TOUCH_MAX) {
++               printf("SWEET TOUCH: F12 reports %u objects, capping at %u\n",
++                   obj, TOUCH_MAX);
++               obj = TOUCH_MAX;
++       }
++       st.objects = obj;
++       /* Sanity: x_max = q8[0] | (q8[1] << 8); y_max = q8[2]; */
++       printf("SWEET TOUCH: F12 layout bit %u objects %u (max-xy readback %u/%u)\n",
++           st.f12_bit, st.objects,
++           (unsigned)(q8[0] | (q8[1] << 8)), (unsigned)q8[2]);
++       return 0;
++}
++
++static int
++touch_one_poll(void)
++{
++       /* If the attention line is high (idle), nothing to do. */
++       if (!(touch_rd(st.gpio[3], 4) & 1u)) {
++               return 0;
++       }
++       if (touch_write(0xff, 0)) {
++               return EIO;
++       }
++       uint8_t irq[8];
++       if (touch_read(st.f01_data, irq, st.irq_bytes)) {
++               return EIO;
++       }
++       if (!(irq[0] & (1u << (st.f12_bit - 1u)))) {
++               return 0; /* interrupt is not F12's; clear it anyway */
++       }
++       uint8_t data[16 * TOUCH_MAX];
++       unsigned data_len = 1 + st.objects * 5; /* header + 5 bytes per object */
++       if (data_len > sizeof(data)) {
++               data_len = sizeof(data);
++       }
++       if (touch_read(st.f12_data1, data, data_len)) {
++               return EIO;
++       }
++       uint32_t newmask = 0;
++       int x[TOUCH_MAX] = {0}, y[TOUCH_MAX] = {0};
++       for (unsigned i = 0; i < st.objects; i++) {
++               const uint8_t *p = data + 1 + i * 5;
++               unsigned type = p[0] & 7u;
++               if (type == 0 || type == 2) {
++                       continue; /* lift / reserved */
++               }
++               unsigned tid = (p[0] >> 4) & 0xfu;
++               if (tid >= TOUCH_MAX) {
++                       continue;
++               }
++               unsigned px = ((unsigned)p[1]) | ((unsigned)(p[3] & 0xf0u) << 4);
++               unsigned py = ((unsigned)p[2]) | ((unsigned)(p[3] & 0x0fu) << 8);
++               if (px > 1079u || py > 1919u) {
++                       /* TODO_VERIFY: OP3 panel max is 1079 x 1919 (Samsung S6E3FA5 or
++                        * S6E3HF5 depending on board revision; confirm via the DTB
++                        * "qcom,mdss-dsi-panel-width" / "-height" properties). */
++                       continue;
++               }
++               x[tid] = (int)px;
++               y[tid] = (int)py;
++               newmask |= 1u << tid;
++       }
++       /* Carry forward coordinates for ids that were not in this report. */
++       for (unsigned id = 0; id < TOUCH_MAX; id++) {
++               if (!(newmask & (1u << id)) && (st.active & (1u << id))) {
++                       x[id] = st.x[id];
++                       y[id] = st.y[id];
++               }
++       }
++       st.active = newmask;
++       for (unsigned id = 0; id < TOUCH_MAX; id++) {
++               st.x[id] = x[id];
++               st.y[id] = y[id];
++       }
++       sweet_hid_touch_report(newmask, x, y);
++       /* Re-enable interrupts. */
++       (void)touch_write(st.f01_ctrl + 1, 0x7fu);
++       return 0;
++}
++
++/* Forward decl: the HID-side aggregator lives in patch 0058. */
++extern void sweet_hid_touch_report(uint32_t mask, int *x, int *y);
++
++static void
++touch_thread(void *arg, wait_result_t result)
++{
++       unsigned errors = 0;
++       (void)arg;
++       (void)result;
++       for (;;) {
++               int err = touch_one_poll();
++               if (err) {
++                       if ((errors++ % 100u) == 0) {
++                               printf("SWEET TOUCH: report err=%d attn=%u status=%#x\n",
++                                   err, touch_rd(st.gpio[3], 4) & 1u,
++                                   touch_rd(st.qup, QUP_ERROR_FLAGS));
++                       }
++               } else {
++                       errors = 0;
++               }
++               /* Poll every 10 ms; attention hint shortens idle but we still read. */
++               thread_block(THREAD_CONTINUE_NULL);
++       }
++}
++
++void
++sweet_touch_init(void)
++{
++       thread_t thread = THREAD_NULL;
++       if (st.started) {
++               return;
++       }
++       st.started = true;
++       /* Optional: skip the touch driver entirely with sweettouch=0. */
++       unsigned skip = 0;
++       PE_parse_boot_argn("sweettouch", &skip, sizeof(skip));
++       if (skip) {
++               printf("SWEET TOUCH: disabled (sweettouch=0)\n");
++               return;
++       }
++       st.vote   = ml_io_map(TOUCH_GCC_VOTE_PA, 0x1000);
++       st.gccqup = ml_io_map(TOUCH_GCC_QUP_PA, 0x1000);
++       st.qup    = ml_io_map(TOUCH_QUP_PA, 0x1000);
++       st.gpio[0] = ml_io_map(TOUCH_TLMM_PA + 0x1000u * TOUCH_SDA,    0x1000);
++       st.gpio[1] = ml_io_map(TOUCH_TLMM_PA + 0x1000u * TOUCH_SCL,    0x1000);
++       st.gpio[2] = ml_io_map(TOUCH_TLMM_PA + 0x1000u * TOUCH_RESET,  0x1000);
++       st.gpio[3] = ml_io_map(TOUCH_TLMM_PA + 0x1000u * TOUCH_ATTN,   0x1000);
++       if (!st.vote || !st.gccqup || !st.qup || !st.gpio[0] || !st.gpio[1] ||
++           !st.gpio[2] || !st.gpio[3]) {
++               printf("SWEET TOUCH: MMIO mapping failed\n");
++               return;
++       }
++       /* Pins: SDA/SCL function 2 (blsp_i2c4), no pull, 2 mA. Reset and attn
++        * are GPIO outputs / inputs. */
++       touch_gpio(0, 2, 0, false, false);
++       touch_gpio(1, 2, 0, false, false);
++       touch_gpio(2, 0, 1, true, true);  /* reset high (idle) */
++       touch_gpio(3, 0, 1, false, false); /* attn input pull-up */
++
++       /* Reset sequence: low for 10 ms, then high. */
++       touch_gpio(2, 0, 1, true, false);
++       touch_delay(10000);
++       touch_gpio(2, 0, 1, true, true);
++       touch_delay(50000);
++
++       if (!touch_clocks()) {
++               st.last_err = 1;
++               return;
++       }
++       touch_wr(st.qup, QUP_SW_RESET, 0); /* de-assert reset */
++       touch_wr(st.qup, QUP_CONFIG, QUP_MINI_CORE | QUP_N_VAL);
++       touch_wr(st.qup, QUP_I2C_CLK_CTL, QUP_CLK_400K);
++       touch_wr(st.qup, QUP_I2C_MASTER_GEN, 0); /* standard mode */
++
++       if (touch_scan_pdt() || touch_f12_layout()) {
++               printf("SWEET TOUCH: probe failed; touch will not report\n");
++               return;
++       }
++       /* Enable F01 interrupts (only F12; the rest are masked). */
++       (void)touch_write(st.f01_ctrl + 1, 0x7fu);
++
++       kern_return_t kr = kernel_thread_start(touch_thread, NULL, &thread);
++       if (kr == KERN_SUCCESS) {
++               thread_deallocate(thread);
++       } else {
++               printf("SWEET TOUCH: thread start failed kr=%d\n", kr);
++       }
++}
++#endif /* ARM64_BOARD_CONFIG_SWEET && SWEET_ONEPLUS3 */
+--- a/bsd/conf/files
++++ b/bsd/conf/files
+@@ -1,3 +1,3 @@
+-bsd/dev/sweet_touch.c          optional sweet
++bsd/dev/sweet_touch.c          optional sweet && !oneplus3
++/* the oneplus3 path overrides sweet_touch.c via the same filename but the
++ * SWEET_ONEPLUS3 guard selects only the OP3 body. See bsd/conf/MASTER. */

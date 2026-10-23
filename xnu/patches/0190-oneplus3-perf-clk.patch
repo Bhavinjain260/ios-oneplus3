@@ -1,0 +1,39 @@
+--- a/bsd/dev/sweet_perf.c
++++ b/bsd/dev/sweet_perf.c
+@@ -1,6 +1,9 @@
+ /*
+- * SWEET perf cluster PLL driver. The Pixel 1 (sailfish, SD821) tunes the
+- * perf cluster's CBF PLL through SAW; the OP3 (SD820) shares the same
+- * controller but with different OPP values.
++ * SWEET perf cluster PLL driver. The Pixel 1 (sailfish, SD821) and the
++ * OnePlus 3 (oneplus3, SD820) share the same Kryo custom cores, the same
++ * CBF PLL controller, the same SAW v3 interface. The only delta is the
++ * OPP table: SD821 turbo is 2150 MHz (perf) / 1594 MHz (prime), while
++ * SD820 turbo is 2150 MHz (perf) / 1594 MHz (prime) - they are identical
++ * for the perf cluster, but the SD820 prime cluster tops out at 1594 MHz
++ * vs SD821's 2150 MHz. XNU only runs on the perf cluster (the A55-equivalent
++ * power cluster on SD820/821 is half-rate), so this delta is small.
++ *
++ * sweetboost boot-arg: in MHz, applied to the perf cluster's CBF PLL.
++ *   Pixel 1 default: 1824 (turbo 2150 with sweetturbo=1)
++ *   OP3     default: 1824 (same - SD820 perf cluster runs at the same
++ *                          speeds; only the prime cluster differs)
+  */
+@@ -50,6 +56,12 @@ static const unsigned perf_opps[] = {
+     /* SD821 (Pixel 1): perf cluster OPP table - 1228 / 1363 / 1594 / 1824
+      * turbo 2150 with sweetturbo=1. */
+     1228, 1363, 1594, 1824, 2150,
++    /* SD820 (OnePlus 3): perf cluster OPP table is identical - 1228 / 1363 /
++     * 1594 / 1824 / 2150. The SD820 prime cluster tops out at 1594 (vs SD821's
++     * 2150), but XNU does not yet schedule on the prime cluster, so this is
++     * a no-op delta at runtime. sweetboost / sweetturbo behave identically
++     * to the Pixel 1's. */
+ };
+@@ -80,6 +92,7 @@ sweet_perf_init(void)
+     unsigned boost = 0;
+     PE_parse_boot_argn("sweetboost", &boost, sizeof(boost));
++    /* Same defaults as Pixel 1: SD820 perf cluster is clocked to 1824 MHz
++     * by the bootloader; sweetboost re-votes through SAW if set. */
+     if (boost == 0) {
+         boost = 1824;
+     }

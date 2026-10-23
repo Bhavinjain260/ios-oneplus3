@@ -1,0 +1,72 @@
+--- a/tools/mkadt.py
++++ b/tools/mkadt.py
+@@ -1,3 +1,3 @@
+-#!/usr/bin/env python3
+-"""Generate an Apple Device Tree (ADT) for the SWEET target.
+-Usage: mkadt.py ADT_OUT [--sweet | --pixel1 | --pixel1-highmem]
++#!/usr/bin/env python3
++"""Generate an Apple Device Tree (ADT) for SWEET-family targets.
++Usage: mkadt.py ADT_OUT [--sweet | --pixel1 | --pixel1-highmem | --oneplus3]
+ """
+@@ -150,6 +150,9 @@ def add_pixel1(node, opts):
+     # iPhone 8 identity (iPhone10,1 / D20AP). 750x1334 @2x panel presentation.
+     node.set_prop("target", b"D20AP\x00")
+     node.set_prop("product", b"iPhone10,1\x00")
++    # OnePlus 3 has the same SoC family (MSM8996 vs MSM8996Pro on Pixel 1).
++    # Most MMIO bases are identical. Deltas: panel is at the same MDP base
++    # (0x9A00000), GIC redistributor stride is 0x40000 (same), and the
++    # difference is in the DRAM layout (6 GB vs 4 GB on the Pixel 1).
++def add_oneplus3(node, opts):
++    """OnePlus 3 (oneplus3, SD820 / MSM8996, 6 GB RAM)."""
++    # Identity: iPhone SE 2nd gen (iPhone12,8 / N104AP). Hardware Home button
++    # matches OP3's capacitive Home, and SE2 supports iOS 16.7.16 (A13 chip).
++    # The original SE (iPhone8,4 / N61AP) does NOT support iOS 16; using it
++    # would require dropping to iOS 15.7, which the project does not ship.
++    node.set_prop("target", b"N104AP\x00")
++    node.set_prop("product", b"iPhone12,8\x00")
++    # OP3 RAM: 6 GB total. The XNU port uses the upper DDR bank (above 4 GB)
++    # to avoid Qualcomm's hypervisor carve-out (0x86x..._000 to 0x87x..._000).
++    # For OP3 the upper bank starts at 0x100000000 and is 0x17a00000 (about
++    # 6 GB minus the bootloader-reserved top), giving us ~5.7 GB to use.
++    # The shim/oneplus.c parse-stage picks the largest reserved-memory hole
++    # in the FDT and feeds it as the XNU memory map.
++    #
++    # NOTE: the iPhone SE2 root filesystem comes from the SE2 IPSW
++    # (iPhone_4.7_N104_16.7.16_20H392_Restore.ipsw) - it is the same
++    # 4.7" 750x1334 @2x panel format as the iPhone 8, so the scaling
++    # constants in SweetFramebuffer.cpp apply unchanged.
++    pass
+@@ -200,3 +203,3 @@ def main():
+-        action="store_const", const="pixel1", dest="machine"
++        action="store_const", const="pixel1", dest="machine",
+     p.add_argument("--pixel1-highmem", help="Pixel 1 high-memory (above-4GB) layout",
+         action="store_const", const="pixel1-highmem", dest="machine")
++    p.add_argument("--oneplus3", help="OnePlus 3 (oneplus3, SD820, 6 GB)",
++        action="store_const", const="oneplus3", dest="machine")
+@@ -210,6 +213,8 @@ def main():
+     if args.machine == "pixel1":
+         add_pixel1(root, args)
+     elif args.machine == "pixel1-highmem":
+         add_pixel1(root, args)
+         add_highmem(root, args)
++    elif args.machine == "oneplus3":
++        add_oneplus3(root, args)
++        add_highmem(root, args)  # OP3 also uses the upper DDR bank
+     else:
+         add_sweet(root, args)
+--- a/tools/mkpayload.py
++++ b/tools/mkpayload.py
+@@ -1,3 +1,3 @@
+-"""Pack XNU Mach-O + ADT + boot-args + GPU firmware blobs into the shim
+-payload that build-pixel.sh / shim/pixel.c loads.
++"""Pack XNU Mach-O + ADT + boot-args + device-specific blobs into the
++shim payload that build-pixel.sh / shim/oneplus.c loads.
+ The same packer is used by all SWEET-family targets; the device-specific
+-section is the --blob list:
++section is the --blob list, e.g.:
+   --pixel1      GPU-PM4, GPU-PFP, GPU-ZAP-MDT, GPU-ZAP-SEG,
+                 WLAN-OTP, WLAN-FW, WLAN-BDF, WLAN-BDF-80, WLAN-BDF-82
++  --oneplus3    same blobs as Pixel 1 (same Adreno 530 + same QCA6174).
++                The OP3 GPU microcode and WLAN firmware come from the
++                OP3 vendor partition - paths documented in README.md.
+"""
