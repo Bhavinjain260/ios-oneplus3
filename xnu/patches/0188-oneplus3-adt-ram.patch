@@ -18,12 +18,15 @@
 +    # difference is in the DRAM layout (6 GB vs 4 GB on the Pixel 1).
 +def add_oneplus3(node, opts):
 +    """OnePlus 3 (oneplus3, SD820 / MSM8996, 6 GB RAM)."""
-+    # Identity: iPhone SE 2nd gen (iPhone12,8 / N104AP). Hardware Home button
-+    # matches OP3's capacitive Home, and SE2 supports iOS 16.7.16 (A13 chip).
-+    # The original SE (iPhone8,4 / N61AP) does NOT support iOS 16; using it
-+    # would require dropping to iOS 15.7, which the project does not ship.
-+    node.set_prop("target", b"N104AP\x00")
-+    node.set_prop("product", b"iPhone12,8\x00")
++    # Identity: iPhone 8 (iPhone10,1 / D20AP). Same 4.7" 750x1334 @2x panel
++    # format as the Pixel 1's chosen iPhone 8 identity, and iPhone 8 is the
++    # only device Apple still signs iOS 16.7.16 for in this panel class
++    # (iPhone SE 2 / iPhone12,8 was pushed to iOS 17, no 16.7.16 IPSW exists
++    # for it; iPhone SE 1 / iPhone8,4 tops out at iOS 15). The Pixel 1 port
++    # also uses iPhone 8 identity (D20AP) so the OP3 patches inherit the
++    # tested identity from sailfish.
++    node.set_prop("target", b"D20AP\x00")
++    node.set_prop("product", b"iPhone10,1\x00")
 +    # OP3 RAM: 6 GB total. The XNU port uses the upper DDR bank (above 4 GB)
 +    # to avoid Qualcomm's hypervisor carve-out (0x86x..._000 to 0x87x..._000).
 +    # For OP3 the upper bank starts at 0x100000000 and is 0x17a00000 (about
