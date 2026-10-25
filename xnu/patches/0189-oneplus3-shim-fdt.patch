@@ -29,7 +29,7 @@
 +     *   rmtfs@87b00000 : 0x...   - modem/rmtfs shared memory
 +     *   mba@...        : modem region
 +     *   navmem@...     : navigation memory (not present on OP3 - skip)
-+     * The upper DDR bank starts at 0x100000000 and runs to about 0x17a000000
++     * The upper DDR bank starts at 0x100000000 and runs to about 0xBD8C00000
 +     * (about 1.95 GB - same physical hole the Pixel 1 uses, since OP3's
 +     * 6 GB DDR is laid out as 2 GB low + 4 GB high - XNU takes the high).
 +     *
@@ -44,7 +44,7 @@
 +        /* ... existing walker with OP3-specific overlap tests ... */
 +    }
 +    *out_pa = 0x100000000ULL;
-+    *out_size = 0x17a00000ULL; /* TODO_VERIFY: 0x17a00000 = ~590 MB free */
++    *out_size = 0xBD8C0000ULL; /* TODO_VERIFY: 0xBD8C0000 = ~590 MB free */
 +    return 0;
 +#else
      *out_pa = 0x100000000ULL;

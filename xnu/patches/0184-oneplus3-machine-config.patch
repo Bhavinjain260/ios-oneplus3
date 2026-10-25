@@ -25,7 +25,7 @@
   * Set SWEET_PIXEL1 for the Pixel 1 and SWEET_ONEPLUS3 for the OnePlus 3.
   */
 -arm64_boost_defines += -DSWEET_PIXEL1
-+arm64_boost_defines += -DSWEET_PIXEL1 -DSWEET_ONEPLUS3
++arm64_boost_defines += -DSWEET_ONEPLUS3
 --- a/pexpert/arm/pe_fiq.c
 +++ b/pexpert/arm/pe_fiq.c
 @@ -19,7 +19,7 @@ MACHINE_TIMEOUT(gicr_wake_timeout_ns, "gicr-wake-timeout", GICR_WAKE_TIMEOUT_NS,

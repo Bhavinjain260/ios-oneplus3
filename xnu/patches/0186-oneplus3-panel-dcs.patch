@@ -33,8 +33,8 @@
  #define SWEET_FB_P1_DOT_PITCH 326
 +#if defined(SWEET_ONEPLUS3)
 +/* OP3 panel: 1080x1920 24bpp, mapped at 0x9c000000 by the stock bootloader.
-+ * TODO_VERIFY(OP3 DTB): some early OP3 board revisions used Samsung S6E3FA5,
-+ * later revisions use S6E3HF5 - the boot bootloader handles init either way.
++ * TODO_VERIFY(OP3 DTB): some early OP3 board revisions used Samsung S6E3FA3,
++ * later revisions use S6E3FA3 - the boot bootloader handles init either way.
 + * XNU sees the framebuffer the bootloader left behind; no panel reprogram. */
 +#define SWEET_FB_OP3_PANEL_W 1080
 +#define SWEET_FB_OP3_PANEL_H 1920
@@ -55,7 +55,7 @@
 +sweet_op3_panel_init(void)
 +{
 +    /* Stub. Future work: port the OP3 DCS init from:
-+     *   msm-3.18: mdss panel driver for oneplus3 (Samsung S6E3FA5 or S6E3HF5)
++     *   msm-3.18: mdss panel driver for oneplus3 (Samsung S6E3FA3 or S6E3FA3)
 +     * The sequence is ~20 DCS commands: sleep-out, ELVDD, ELON, MIPI, GAMMA,
 +     * porch, enable, etc. Skipped for now - the bootloader leaves the panel
 +     * in continuous-splash command mode, which is what AppleCLCD expects.

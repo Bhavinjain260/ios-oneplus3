@@ -29,7 +29,7 @@
 +    node.set_prop("product", b"iPhone10,1\x00")
 +    # OP3 RAM: 6 GB total. The XNU port uses the upper DDR bank (above 4 GB)
 +    # to avoid Qualcomm's hypervisor carve-out (0x86x..._000 to 0x87x..._000).
-+    # For OP3 the upper bank starts at 0x100000000 and is 0x17a00000 (about
++    # For OP3 the upper bank starts at 0x100000000 and is 0xBD8C0000 (about
 +    # 6 GB minus the bootloader-reserved top), giving us ~5.7 GB to use.
 +    # The shim/oneplus.c parse-stage picks the largest reserved-memory hole
 +    # in the FDT and feeds it as the XNU memory map.
